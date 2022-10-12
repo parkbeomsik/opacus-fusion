@@ -15,6 +15,7 @@
 
 #include "grad_example_module_conv.h"
 #include "grad_example_module_linear.h"
+#include "quantize.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::class_<Conv2dConfig>(m, "Conv2dConfig").def(py::init<int &, int &, int &, int &,
@@ -33,4 +34,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                           .def("get_clip_reduce_ms", &ReturnType::get_clip_reduce_ms);
   m.def("get_clip_and_reduced_grads_conv", &get_clip_and_reduced_grads_conv, "LLTM forward (CUDA)");
   m.def("get_clip_and_reduced_grads_linear", &get_clip_and_reduced_grads_linear, "LLTM forward (CUDA)");
+  m.def("quantize_int8", &quantize_int8, "Quantize Int8 (CUDA)");
 }

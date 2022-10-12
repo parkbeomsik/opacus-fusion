@@ -38,6 +38,12 @@ cd $WHERE_YOU_DOWNLOAD_OPACUS_FUSION
 cd grad_example_module
 python setup.py install
 ```
+7. Install custom_rnn
+```bash
+cd $WHERE_YOU_DOWNLOAD_OPACUS_FUSION
+cd custom_rnn
+python setup.py install
+```
 
 ## Run
 ```bash

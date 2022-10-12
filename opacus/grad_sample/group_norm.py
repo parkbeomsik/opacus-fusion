@@ -51,7 +51,7 @@ def compute_group_norm_grad_sample(
             ret[layer.weight] = PerSampleGrads(contract("ni...->ni", gs))
             profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_REWEIGHT:
-            gs = contract("ni...->ni", gs)
+            gs = PerSampleGrads(contract("ni...->ni", gs))
             profiler.record("Backward weight")
             layer.weight.grad_sample_norms = [gs.norm(2, dim=1)]
             profiler.record("Clip/reduce")
@@ -61,7 +61,7 @@ def compute_group_norm_grad_sample(
             ret[layer.bias] = PerSampleGrads(contract("ni...->ni", backprops))
             profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_REWEIGHT:
-            backprops = contract("ni...->ni", backprops)
+            backprops = PerSampleGrads(contract("ni...->ni", backprops))
             profiler.record("Backward weight")
             layer.bias.grad_sample_norms = [backprops.norm(2, dim=1)]
             profiler.record("Clip/reduce")

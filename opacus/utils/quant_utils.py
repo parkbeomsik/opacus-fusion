@@ -3,6 +3,8 @@ from typing import Sequence, Type, Union
 import torch.nn as nn
 import torch
 
+from grad_example_module import quantize_int8
+
 sp_ratio = 0.3
 def batch_sparse(m, ratio=sp_ratio):
 
@@ -72,19 +74,20 @@ encode_stream = torch.cuda.Stream()
 
 def batch_quantization_encode(m, bit=8):
     torch.cuda.set_stream(encode_stream)
-    max_int = 2**(bit-1)
-    m_shape = m.shape
-    m = m.reshape(m.shape[0], -1)
-    max_m = torch.abs(m).max(dim=1, keepdim=True)
-    m = (m*max_int)/(max_m.values)
+    # max_int = 2**(bit-1)
+    # m_shape = m.shape
+    # m = m.reshape(m.shape[0], -1)
+    # max_m = torch.abs(m).max()#dim=1, keepdim=True)
+    # m = m*(max_int/max_m) #.values)
     # m = torch.round(m)
     # m = m.to(torch.int)
-    m = stochastic_rounding(m)
-    m = m.to(torch.int8)
+    # m = stochastic_rounding(m)
+    # m = m.to(torch.int8)
     # m = m.to(torch.float32)
-    m = m.reshape(m_shape)
+    # m = m.reshape(m_shape)
+    m, max_m = quantize_int8(m)
     torch.cuda.set_stream(torch.cuda.default_stream())
-    return m, max_m.values
+    return m, max_m #.values
 
 def batch_quantization_decode(m, max_m, bit=8):
     max_int = 2**(bit-1)

@@ -1,3 +1,4 @@
+from email.policy import default
 from opacus import config
 
 import torch
@@ -7,18 +8,31 @@ import gc
 
 import pandas as pd
 
+from opacus.custom_tensor import PerBatchGrads, PerSampleGrads, GradOutputs
+
 def get_memory_usage():
     # Print all tensors
     gc.collect()
-    memory_usage = {}
+    memory_usage = defaultdict(int)
     for obj in gc.get_objects():
         try:
             if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
                 and obj.device == "cuda:0":
+                size_in_bytes = obj.numel() * obj.element_size()
                 if type(obj) == torch.Tensor:
-                    pass
+                    memory_usage["Input activations"] += size_in_bytes
+                if type(obj) == torch.nn.Parameter:
+                    memory_usage["Weights"] += size_in_bytes
+                if type(obj) == PerSampleGrads:
+                    memory_usage["Per-example weight gradients"] += size_in_bytes
+                if type(obj) == PerBatchGrads:
+                    memory_usage["Per-batch weight gradients"] += size_in_bytes
+                if type(obj) == GradOutputs:
+                    memory_usage["Activation gradients"] += size_in_bytes
         except:
             pass
+
+    return memory_usage
 
 class Profiler():
     def __init__(self):
@@ -28,7 +42,7 @@ class Profiler():
         self.start_interval_time = time.time()
         self.ignore_time = 0
         self.time_keys = ["Total", "Data loading", "Forward", "Backward activation", "Backward weight", "Clip/reduce", "Add noise", "Update"]
-        self.memory_keys = ["Peak memory usage"]
+        self.memory_keys = ["Peak memory usage", "Weights", "Input activations", "Activation gradients", "Per-batch weight gradients", "Per-example weight gradients"]
         self.peak_memory_usage = 0
         self.step_count = 0
 
@@ -61,7 +75,12 @@ class Profiler():
         self.start_interval_time = time.time()
 
     def record_memory(self, type=""):
-        self.memory_records["Peak memory usage"] = torch.cuda.max_memory_allocated() # Bytes
+        if config.profile_memory:
+            self.memory_records["Peak memory usage"] = torch.cuda.max_memory_allocated() # Bytes
+            memory_usage = get_memory_usage()
+            for key in memory_usage:
+                self.memory_records[key] = max(memory_usage[key], self.memory_records[key])
+
 
     def record(self, type=""):
         if config.profile_time:

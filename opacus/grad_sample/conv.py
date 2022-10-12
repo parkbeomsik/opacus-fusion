@@ -116,7 +116,7 @@ def compute_conv_grad_sample(
                 int(layer.in_channels / layer.groups),
                 np.prod(layer.kernel_size),
             )
-            grad_sample = contract("ngrg...->ngr...", grad_sample).contiguous()
+            grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample).contiguous())
             profiler.record("Backward weight")
 
             shape = [n] + list(layer.weight.shape)
@@ -135,7 +135,7 @@ def compute_conv_grad_sample(
             ret[layer.bias] = PerSampleGrads(torch.sum(backprops, dim=2))
             profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_REWEIGHT:
-            backprops = torch.sum(backprops, dim=2)
+            backprops = PerSampleGrads(torch.sum(backprops, dim=2))
             profiler.record("Backward weight")
             layer.bias.grad_sample_norms = [backprops.norm(2, dim=(1,))]
             profiler.record("Clip/reduce")

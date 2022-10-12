@@ -64,6 +64,7 @@ def compute_embedding_grad_sample(
             grad_sample.scatter_add_(
                 1, index, backprops.reshape(batch_size, -1, layer.embedding_dim)
             )
+            grad_sample = PerSampleGrads(grad_sample)
             torch.backends.cudnn.deterministic = saved
             if config.dpsgd_mode == MODE_NAIVE:
                 ret[layer.weight] = grad_sample

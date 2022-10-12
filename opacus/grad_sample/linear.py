@@ -71,7 +71,7 @@ def compute_linear_grad_sample(
             ret[layer.bias] = PerSampleGrads(contract("n...k->nk", backprops))
             profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_REWEIGHT:
-            contracted_backprops = contract("n...k->nk", backprops)
+            contracted_backprops = PerSampleGrads(contract("n...k->nk", backprops))
             profiler.record("Backward weight")
             layer.bias.grad_sample_norms = [contracted_backprops.norm(2, dim=1)]
             profiler.record("Clip/reduce")

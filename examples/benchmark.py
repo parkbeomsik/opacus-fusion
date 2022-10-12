@@ -399,6 +399,18 @@ def main():  # noqa: C901
         print("                                     Memory records")
         print("")
         print(profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]))  
+        print("")
+        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv())
+
+        if args.log_file != "":
+            if os.path.exists(args.log_file):
+                with open(args.log_file, "a") as f:
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    f.write(row.split('\n')[1] + "\n")
+            else:
+                with open(args.log_file, "w") as f:
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    f.write(row)
 
     if not config.profile_time and not config.profile_memory:
         print("")

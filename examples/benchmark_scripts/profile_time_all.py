@@ -4,10 +4,11 @@ import subprocess
 
 # Set environment
 CPU_AFFINITY=0-2
-LOG_FILE_NAME="results/result.csv"
+LOG_FILE_NAME="results/a100_result.csv"
+MAX_BATCH_SIZE_FILE_NAME="results/A100_max_batch_size.json"
 
 # Batch size configuration
-with open("results/max_batch_size.json", "r") as f:
+with open(MAX_BATCH_SIZE_FILE_NAME, "r") as f:
     batch_size_dict = json.load(f)
 
 cnn_experiments = [
@@ -26,8 +27,8 @@ rnn_experiments = [
     ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"), ("rnn", "deepspeech", "512"),
 ]
 
-experiments = cnn_experiments # transformer_experiments + rnn_experiments
-algos = ["elegant"] # ["naive", "reweight", "elegant"]
+experiments = transformer_experiments + rnn_experiments
+algos = ["naive", "reweight", "elegant", "elegant-quant"]
 
 experiments = list(itertools.product(experiments, algos))
 

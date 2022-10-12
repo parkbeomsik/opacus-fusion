@@ -144,6 +144,7 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
   float beta_float = 0;
 
   int offset = 0;
+  auto scale = torch::ones({1}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kInt32));
   
   for (size_t i=0; i < Linear::descriptors.size(); ++i) {
     LinearDescriptor& descriptor = Linear::descriptors.at(i);
@@ -180,19 +181,32 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
                                     CUBLAS_GEMM_DEFAULT));
 
     if (quant) {
+      
       if (compute_32i) {
-        per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}).to(torch::TensorOptions().dtype(torch::kInt32)));
-      }
-      else {
         per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
       }
-      for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-        per_example_gradient.index({Slice(offset + m*n*layer_idx, offset + m*n*(layer_idx - 1))}).mul_(torch::ones({1}, torch::TensorOptions().device(torch::kCUDA, 0)));
+      else {
+        // per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
+        checkCudaErrors(cudaMemcpyAsync(per_example_gradient.index({offset}).data_ptr(), per_example_gradient_int32.index({offset}).data_ptr(), m*n*num_layers, cudaMemcpyDeviceToDevice));
       }
+      // auto scale = torch::ones({num_layers}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kInt32));
+      // for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+      // at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromExternal(Linear::cuda_streams[i%10], 0));
+      // per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, (per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}).view({m*n, num_layers}) * scale).view({m*n*num_layers}));
+      // per_example_gradient.index({Slice(offset, offset + m*n*num_layers)}).view({m*n, num_layers}).mul_(scale);
+
+        // checkCUBLAS(cublasSscal(Linear::cublas_handles[i%10],
+        //                         m*n,
+        //                         &alpha_float,
+        //                         (float *)per_example_gradient.index({offset + m*n*layer_idx}).data_ptr(),
+        //                         1));
+      // }
+      
     }
 
     offset += m*n*num_layers;
   }
+  at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -380,6 +394,28 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     }
 
     TIME_PROFILE(clip_reduce_ms, time_profile);
+  }
+
+  // Dequentize
+  if (quant) {
+    auto scale = torch::ones({1}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kFloat32));
+    int offset = 0;
+    for (size_t i = 0; i < Linear::descriptors.size(); ++i) {
+      LinearDescriptor& descriptor = Linear::descriptors.at(i);
+
+      int m = descriptor.config.in_features;
+      int n = descriptor.config.out_features;
+      int num_layers = descriptor.config.num_layers;
+
+      if (i >= end_non_reweight_layer){
+        break;
+      }
+      for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+        per_batch_gradient.index({Slice(offset, offset + m*n)}).mul_(scale);
+
+        offset += m*n;
+      }
+    }
   }
 
   // Scale and reduce pre-computed per-example grads

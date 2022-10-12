@@ -414,6 +414,8 @@ class DPOptimizer(Optimizer):
         """
 
         if config.dpsgd_mode == MODE_NAIVE:
+            profiler.record_memory()
+
             per_param_norms = [
                 g.reshape(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
             ]
@@ -433,6 +435,8 @@ class DPOptimizer(Optimizer):
                     p.summed_grad = PerBatchGrads(grad)
 
                 _mark_as_processed(p.grad_sample)
+
+            profiler.record_memory()
 
         elif config.dpsgd_mode == MODE_REWEIGHT:
             # Collect gradient norms from all layers
@@ -545,7 +549,7 @@ class DPOptimizer(Optimizer):
                 for name, layer in trainable_modules(self.module):
 
                     if isinstance(layer, nn.Conv2d):
-                        activations.append(TTensor(layer.activations[0]))
+                        activations.append(layer.activations[0])
                         grad_outputs.append(layer.grad_outputs[0])
                         if layer.bias is not None:
                             precomputed_grads.append(layer.bias.grad_sample)

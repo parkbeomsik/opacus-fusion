@@ -4,3 +4,4 @@ numpy>=1.15
 scipy>=1.2
 opt-einsum>=3.3.0
 transformers
+pandas
