@@ -20,5 +20,9 @@
     "rnn deepspeech 32": 16,
     "rnn deepspeech 64": 16,
     "rnn deepspeech 128": 16,
-    "rnn deepspeech 256": 16
+    "rnn deepspeech 256": 16,
+    "transformer bert-base 512": 32,
+    "transformer bert-large 512": 8,
+    "rnn gnmt 512": 4,
+    "rnn deepspeech 512": 16
 }

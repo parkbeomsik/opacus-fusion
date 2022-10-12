@@ -9,16 +9,18 @@ cnn_experiments = [
 ]
 
 transformer_experiments = [
-    ("transformer", "bert-base", "32"), ("transformer", "bert-base", "64"), ("transformer", "bert-base", "128"), ("transformer", "bert-base", "256"),
-    ("transformer", "bert-large", "32"), ("transformer", "bert-large", "64"), ("transformer", "bert-large", "128"), ("transformer", "bert-large", "256")
+    # ("transformer", "bert-base", "32"), ("transformer", "bert-base", "64"), ("transformer", "bert-base", "128"), ("transformer", "bert-base", "256"),
+    # ("transformer", "bert-large", "32"), ("transformer", "bert-large", "64"), ("transformer", "bert-large", "128"), ("transformer", "bert-large", "256"),
+    ("transformer", "bert-base", "512"), ("transformer", "bert-large", "512"),
 ]
 
 rnn_experiments = [
-    ("rnn", "gnmt", "32"), ("rnn", "gnmt", "64"), ("rnn", "gnmt", "128"), ("rnn", "gnmt", "256"),
-    ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"),
+    # ("rnn", "gnmt", "32"), ("rnn", "gnmt", "64"), ("rnn", "gnmt", "128"), ("rnn", "gnmt", "256"),
+    # ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"),
+    ("rnn", "gnmt", "512"), ("rnn", "deepspeech", "512"),
 ]
 
-experiments = cnn_experiments + transformer_experiments + rnn_experiments
+experiments = transformer_experiments + rnn_experiments
 
 if os.path.exists("results/max_batch_size.json"):
     with open("results/max_batch_size.json", "r") as f:
@@ -38,7 +40,7 @@ for experiment in experiments:
             break
         batch_size *= 2
 
-    batch_size_dict[" ".join(experiment)] = batch_size
+    batch_size_dict[" ".join(experiment)] = batch_size / 2
 
     with open("results/max_batch_size.json", "w") as f:
         json.dump(batch_size_dict, f, indent=4)

@@ -17,27 +17,31 @@ cnn_experiments = [
 ]
 
 transformer_experiments = [
-    ("transformer", "bert-base", "32"), ("transformer", "bert-base", "64"), ("transformer", "bert-base", "128"), ("transformer", "bert-base", "256"),
-    ("transformer", "bert-large", "32"), ("transformer", "bert-large", "64"), ("transformer", "bert-large", "128"), ("transformer", "bert-large", "256")
+    ("transformer", "bert-base", "32"), ("transformer", "bert-base", "64"), ("transformer", "bert-base", "128"), ("transformer", "bert-base", "256"), ("transformer", "bert-base", "512"),
+    ("transformer", "bert-large", "32"), ("transformer", "bert-large", "64"), ("transformer", "bert-large", "128"), ("transformer", "bert-large", "256"), ("transformer", "bert-large", "512")
 ]
 
 rnn_experiments = [
-    ("rnn", "gnmt", "32"), ("rnn", "gnmt", "64"), ("rnn", "gnmt", "128"), ("rnn", "gnmt", "256"),
-    ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"),
+    ("rnn", "gnmt", "32"), ("rnn", "gnmt", "64"), ("rnn", "gnmt", "128"), ("rnn", "gnmt", "256"), ("rnn", "gnmt", "512"),
+    ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"), ("rnn", "deepspeech", "512"),
 ]
 
-experiments = transformer_experiments + rnn_experiments
-algos = ["naive", "reweight", "elegant"]
+experiments = cnn_experiments # transformer_experiments + rnn_experiments
+algos = ["elegant"] # ["naive", "reweight", "elegant"]
 
 experiments = list(itertools.product(experiments, algos))
 
 for case in experiments:
     print(case)
     (model_type, architecture, input_size), algo = case
+    quant = False
+    if algo == "elegant-quant":
+        quant = True
+        algo = "elegant"
 
     batch_size = batch_size_dict[" ".join((model_type, architecture, input_size))]
 
-    args = f"nice -n 10 taskset -c 0-20 python benchmark.py --steps 100 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} --batch_size {batch_size} --profile_time --log_file {LOG_FILE_NAME}"
+    args = f"nice -n 10 taskset -c 0-20 python benchmark.py --steps 100 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} {'--quant' if quant else ''} --batch_size {batch_size} --profile_time --log_file {LOG_FILE_NAME}"
     print(args)
     ret = subprocess.run(args, shell=True)
     return_code = ret.returncode

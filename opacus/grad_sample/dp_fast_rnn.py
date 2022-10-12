@@ -44,9 +44,15 @@ def compute_rnn_grad_sample(
 
     if config.dpsgd_mode == MODE_ELEGANT:
         if config.quantization:
-            m, scale = batch_quantization_encode(backprops, bit=8)
-            layer.grad_outputs = [GradOutputs(m)]
-            layer.grad_outputs_scale = scale
+            if layer.bidirectional:
+                m1, scale1 = batch_quantization_encode(backprops[0], bit=8)
+                m2, scale2 = batch_quantization_encode(backprops[1], bit=8)
+                layer.grad_outputs = [GradOutputs(m1), GradOutputs(m2)]
+                layer.grad_outputs_scale = [scale1, scale2]
+            else:
+                m, scale = batch_quantization_encode(backprops[0], bit=8)
+                layer.grad_outputs = [GradOutputs(m)]
+                layer.grad_outputs_scale = [scale]
         else:
             if layer.bidirectional:
                 layer.grad_outputs = [GradOutputs(backprops[0]), GradOutputs(backprops[1])]

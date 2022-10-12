@@ -475,8 +475,8 @@ class DPOptimizer(Optimizer):
 
             # This can be removed using better implementation
             # So, we will ignore time for this second propagation
-            torch.cuda.synchronize()
-            start = time.time()
+            # torch.cuda.synchronize()
+            # start = time.time()
 
             if config.model_type == "cnn" or config.model_type == "rnn":
                 output = self.module(*input)
@@ -486,9 +486,9 @@ class DPOptimizer(Optimizer):
             loss = criterion(output, target)
             loss = (loss * per_sample_clip_factor).mean()
 
-            profiler.reset_time()
+            # profiler.reset_time()
             torch.cuda.synchronize()
-            total_ignored_time.append(time.time() - start)
+            # total_ignored_time.append(time.time() - start)
 
             ## Second backpropagation (get per-batch gradient)
             loss.backward()

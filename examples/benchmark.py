@@ -103,6 +103,7 @@ def print_args(args):
     print("                          Configuration                           ")
     print("==================================================================")
     print(f"DPSGD mode       : {args.dpsgd_mode}")
+    print(f"Quantization     : {args.quant}")
     print(f"Model type       : {args.model_type}")
     print(f"Architecture     : {args.architecture}")
     print(f"Input size       : {args.input_size}")
@@ -123,6 +124,8 @@ def main():  # noqa: C901
         config.dpsgd_mode = config.MODE_REWEIGHT
     elif args.dpsgd_mode == "elegant":
         config.dpsgd_mode = config.MODE_ELEGANT
+
+    config.quantization = args.quant
 
     config.profile_time = args.profile_time
     config.profile_memory = args.profile_memory
@@ -382,11 +385,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
 
     if config.profile_memory:
@@ -537,6 +540,13 @@ def parse_args():
         default="cnn",
         choices=['cnn', 'transformer', 'rnn'],
         help="Model type. (cnn, transformer, rnn)"
+    )
+
+    parser.add_argument(
+        "--quant",
+        action="store_true",
+        default=False,
+        help="INT8 quantization.",
     )
 
     parser.add_argument(

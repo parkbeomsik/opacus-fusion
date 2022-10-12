@@ -39,12 +39,12 @@ def compute_embedding_grad_sample(
         backprops: Backpropagations
     """    
     if config.dpsgd_mode == MODE_ELEGANT:
-        if config.quantization:
-            m, scale = batch_quantization_encode(backprops, bit=8)
-            layer.grad_outputs = [GradOutputs(m)]
-            layer.grad_outputs_scale = scale
-        else:
-            layer.grad_outputs = [GradOutputs(backprops)]
+        # if config.quantization:
+        #     m, scale = batch_quantization_encode(backprops, bit=8)
+        #     layer.grad_outputs = [GradOutputs(m)]
+        #     layer.grad_outputs_scale = scale
+        # else:
+        layer.grad_outputs = [GradOutputs(backprops)]
 
     ret = {}
     if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:

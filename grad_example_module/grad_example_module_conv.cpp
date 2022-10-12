@@ -39,6 +39,7 @@ void * bwd_filter_batch_workspace = NULL;
 #define _N_CUDA_STREAMS 100
 cudaStream_t cuda_streams[_N_CUDA_STREAMS];
 cudnnHandle_t cudnn_handles[_N_CUDA_STREAMS];
+cublasHandle_t cublas_handles[1];
 
 // CUTLASS device workspaces
 torch::Tensor tensor_for_device_ptr_A;
@@ -72,6 +73,9 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreate(&cudnn_handles[i]));
     checkCUDNN(cudnnSetStream(cudnn_handles[i], cuda_streams[i]));
   }
+  checkCUBLAS(cublasCreate(&cublas_handles[0]));
+  checkCUBLAS(cublasSetStream(cublas_handles[0], cuda_streams[0]));
+  cublasSetPointerMode(cublas_handles[0], CUBLAS_POINTER_MODE_DEVICE);
 
   descriptors.clear();
   descriptors.resize(configs.size());
@@ -489,6 +493,12 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
   // }
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {0}, false);
+  // torch::Tensor norm = torch::empty({1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  // checkCUBLAS(cublasSnrm2(cublas_handles[0],
+  //                         partial_per_example_gradient.sizes()[0],
+  //                         (float *)partial_per_example_gradient.data_ptr(),
+  //                         1,
+  //                         (float *)norm.data_ptr()));
 
   compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm);
   // checkCudaErrors(cudaDeviceSynchronize());
@@ -565,8 +575,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float norm_ms = 0.0;
   float clip_reduce_ms = 0.0;
 
-  auto partial_per_example_gradient = torch::zeros({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  auto partial_per_example_gradient2 = torch::zeros({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_example_gradient = torch::empty({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_example_gradient2 = torch::empty({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   
   // Set CUTLASS device pointers
   if (descriptors.size() - end_cudnn_layer > 0) {
@@ -599,12 +609,13 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   // Compute per-example gradients and scaling factors
   for (int example_idx = 0; example_idx < batch_count; ++example_idx) {
     // Compute wgrad of front layers using cuDNN
-    compute_single_per_example_gradient_cudnn(descriptors, partial_per_example_gradient, actvs, ograds, end_cudnn_layer, example_idx);
-    // torch::cuda::synchronize();
-    // checkCudaErrors(cudaDeviceSynchronize());
     LOG_STDERR("Compute wgrad of back layers using CUTLASS", verbose);
     // Compute wgrad of back layers using CUTLASS
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
+    compute_single_per_example_gradient_cudnn(descriptors, partial_per_example_gradient, actvs, ograds, end_cudnn_layer, example_idx);
+    // torch::cuda::synchronize();
+    // checkCudaErrors(cudaDeviceSynchronize());
+
 
     // checkCudaErrors(cudaDeviceSynchronize());
     // torch::cuda::synchronize();
@@ -622,7 +633,17 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     // torch::cuda::synchronize();
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate
-    per_batch_gradient += partial_per_example_gradient.index({Slice(0, (int)non_reweight_per_example_gradient_size)}) * scaling_factors.index({example_idx});
+    // per_batch_gradient += partial_per_example_gradient.index({Slice(0, (int)non_reweight_per_example_gradient_size)}) * scaling_factors.index({example_idx});
+    if (non_reweight_per_example_gradient_size > 0) {
+      // checkCUBLAS(cublasSaxpy(cublas_handles[0],
+      //                         (int)non_reweight_per_example_gradient_size,
+      //                         (float *)scaling_factors.index({example_idx}).data_ptr(),
+      //                         (float *)partial_per_example_gradient.data_ptr(),
+      //                         1,
+      //                         (float *)per_batch_gradient.data_ptr(),
+      //                         1));
+      per_batch_gradient.add(partial_per_example_gradient.index({Slice(0, (int)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
+    }
 
     // torch::cuda::synchronize();
     TIME_PROFILE(clip_reduce_ms, time_profile);
