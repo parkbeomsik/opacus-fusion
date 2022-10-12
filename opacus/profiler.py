@@ -3,8 +3,22 @@ from opacus import config
 import torch
 import time
 from collections import defaultdict
+import gc
 
 import pandas as pd
+
+def get_memory_usage():
+    # Print all tensors
+    gc.collect()
+    memory_usage = {}
+    for obj in gc.get_objects():
+        try:
+            if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
+                and obj.device == "cuda:0":
+                if type(obj) == torch.Tensor:
+                    pass
+        except:
+            pass
 
 class Profiler():
     def __init__(self):

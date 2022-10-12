@@ -353,7 +353,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   for (int example_idx = 0; example_idx < batch_count; ++example_idx) {
     // Compute wgrad of front layers using CUBLAS
     compute_single_per_example_gradient_embedding(partial_per_example_gradient, embedding_actvs, embedding_ograds, embedding_vocab_sizes, example_idx);
-    compute_single_per_example_gradient_cublas(partial_per_example_gradient, actvs, ograds, example_idx, quant);
+    compute_single_per_example_gradient_cublas(partial_per_example_gradient, partial_per_example_gradient_int32, actvs, ograds, example_idx, quant);
     // checkCudaErrors(cudaDeviceSynchronize());
     checkCudaErrors(cudaDeviceSynchronize());
 
