@@ -39,23 +39,12 @@ cd grad_example_module
 python setup.py install
 ```
 
-The latest release of Opacus can be installed via `pip`:
+## Run
 ```bash
-pip install opacus
-```
-OR, alternatively, via `conda`:
-```bash
-conda install -c conda-forge opacus
+cd examples
+python benchmark_scripts/profile_time_all.py
 ```
 
-You can also install directly from the source for the latest features (along with its quirks and potentially occasional bugs):
-```bash
-git clone https://github.com/pytorch/opacus.git
-cd opacus
-pip install -e .
-```
-
-## Getting started
 To train your model with differential privacy, all you need to do is to instantiate a `PrivacyEngine` and pass your model, data_loader, and optimizer to the engine's `make_private()` method to obtain their private counterparts.
 
 ```python
