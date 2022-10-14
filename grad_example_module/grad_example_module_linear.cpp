@@ -17,6 +17,7 @@
 #include "grad_example_module_conv.h"
 
 #include "utils.h"
+#include "quantize.h"
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -89,6 +90,9 @@ void set_descriptors_linear(std::vector<LinearConfig> &configs, bool quant=false
     Linear::descriptors.at(i).B_array = (void **)Linear::descriptors.at(i).tensor_for_B_array.data_ptr();
     Linear::descriptors.at(i).C_array = (void **)Linear::descriptors.at(i).tensor_for_C_array.data_ptr();
 
+    Linear::descriptors.at(i).host_A_array.resize(config->N*config->num_layers);
+    Linear::descriptors.at(i).host_B_array.resize(config->N*config->num_layers);
+    Linear::descriptors.at(i).host_C_array.resize(config->num_layers);
   }
 }
 
@@ -105,9 +109,9 @@ void set_cublas_device_ptr_array(std::vector<std::vector<torch::Tensor>>& actvs,
         int batch_size = descriptor.config.N;
         int num_layers = descriptor.config.num_layers;
 
-        std::vector<void *> host_A_array(batch_size*num_layers, NULL);
-        std::vector<void *> host_B_array(batch_size*num_layers, NULL);
-        std::vector<void *> host_C_array(num_layers, NULL);
+        std::vector<void *>& host_A_array = descriptor.host_A_array;
+        std::vector<void *>& host_B_array = descriptor.host_B_array;
+        std::vector<void *>& host_C_array = descriptor.host_C_array;
 
         for (size_t example_idx=0; example_idx < batch_size; ++example_idx) {
             for (size_t layer_idx=0; layer_idx < num_layers; ++layer_idx) {
@@ -119,9 +123,9 @@ void set_cublas_device_ptr_array(std::vector<std::vector<torch::Tensor>>& actvs,
             host_C_array.at(layer_idx) = wgrad_ptrs.at(descriptor_idx).at(layer_idx);
         }
 
-        checkCudaErrors(cudaMemcpy((void *)descriptor.A_array, &host_A_array[0], sizeof(void*)*batch_size*num_layers, cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy((void *)descriptor.B_array, &host_B_array[0], sizeof(void*)*batch_size*num_layers, cudaMemcpyHostToDevice));
-        checkCudaErrors(cudaMemcpy((void *)descriptor.C_array, &host_C_array[0], sizeof(void*)*num_layers, cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpyAsync((void *)descriptor.A_array, &host_A_array[0], sizeof(void*)*batch_size*num_layers, cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpyAsync((void *)descriptor.B_array, &host_B_array[0], sizeof(void*)*batch_size*num_layers, cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpyAsync((void *)descriptor.C_array, &host_C_array[0], sizeof(void*)*num_layers, cudaMemcpyHostToDevice));
     }
 }
 
@@ -178,17 +182,17 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
                                     m,
                                     num_layers,
                                     (quant && compute_32i)? CUBLAS_COMPUTE_32I : CUBLAS_COMPUTE_32F,
-                                    CUBLAS_GEMM_DEFAULT));
+                                    CUBLAS_GEMM_DEFAULT_TENSOR_OP));
 
     if (quant) {
       
-      if (compute_32i) {
-        per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
-      }
-      else {
-        // per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
-        checkCudaErrors(cudaMemcpyAsync(per_example_gradient.index({offset}).data_ptr(), per_example_gradient_int32.index({offset}).data_ptr(), m*n*num_layers, cudaMemcpyDeviceToDevice));
-      }
+      // if (compute_32i) {
+      //   per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
+      // }
+      // else {
+      //   // per_example_gradient.index_put_({Slice(offset, offset + m*n*num_layers)}, per_example_gradient_int32.index({Slice(offset, offset + m*n*num_layers)}));
+      //   checkCudaErrors(cudaMemcpyAsync(per_example_gradient.index({offset}).data_ptr(), per_example_gradient_int32.index({offset}).data_ptr(), m*n*num_layers, cudaMemcpyDeviceToDevice));
+      // }
       // auto scale = torch::ones({num_layers}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kInt32));
       // for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
       // at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromExternal(Linear::cuda_streams[i%10], 0));
@@ -206,7 +210,10 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
 
     offset += m*n*num_layers;
   }
-  at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
+  if (quant) {
+    // per_example_gradient.index_put_({Slice(0, Linear::partial_per_example_gradient_size)}, per_example_gradient_int32.index({Slice(0, Linear::partial_per_example_gradient_size)}));
+    int32_to_float32(per_example_gradient_int32, per_example_gradient, Linear::partial_per_example_gradient_size);
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -353,7 +360,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     }
   }
   set_cublas_device_ptr_array(actvs, ograds, wgrad_ptrs);
-  checkCudaErrors(cudaDeviceSynchronize());
+  // checkCudaErrors(cudaDeviceSynchronize());
 
   // Create tensor to accumulate gradients
   auto per_batch_gradient = torch::zeros({(int64_t)Linear::non_reweight_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -369,7 +376,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     compute_single_per_example_gradient_embedding(partial_per_example_gradient, embedding_actvs, embedding_ograds, embedding_vocab_sizes, example_idx);
     compute_single_per_example_gradient_cublas(partial_per_example_gradient, partial_per_example_gradient_int32, actvs, ograds, example_idx, quant);
     // checkCudaErrors(cudaDeviceSynchronize());
-    checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaDeviceSynchronize());
 
     TIME_PROFILE(backward_weight_ms, time_profile);
 
@@ -397,26 +404,26 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   }
 
   // Dequentize
-  if (quant) {
-    auto scale = torch::ones({1}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kFloat32));
-    int offset = 0;
-    for (size_t i = 0; i < Linear::descriptors.size(); ++i) {
-      LinearDescriptor& descriptor = Linear::descriptors.at(i);
+  // if (quant) {
+  //   auto scale = torch::ones({1}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kFloat32));
+  //   int offset = 0;
+  //   for (size_t i = 0; i < Linear::descriptors.size(); ++i) {
+  //     LinearDescriptor& descriptor = Linear::descriptors.at(i);
 
-      int m = descriptor.config.in_features;
-      int n = descriptor.config.out_features;
-      int num_layers = descriptor.config.num_layers;
+  //     int m = descriptor.config.in_features;
+  //     int n = descriptor.config.out_features;
+  //     int num_layers = descriptor.config.num_layers;
 
-      if (i >= end_non_reweight_layer){
-        break;
-      }
-      for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
-        per_batch_gradient.index({Slice(offset, offset + m*n)}).mul_(scale);
+  //     if (i >= end_non_reweight_layer){
+  //       break;
+  //     }
+  //     for (int layer_idx = 0; layer_idx < num_layers; ++layer_idx) {
+  //       per_batch_gradient.index({Slice(offset, offset + m*n)}).mul_(scale);
 
-        offset += m*n;
-      }
-    }
-  }
+  //       offset += m*n;
+  //     }
+  //   }
+  // }
 
   // Scale and reduce pre-computed per-example grads
   LOG_STDERR("Scale and reduce pre-computed per-example grads", verbose);

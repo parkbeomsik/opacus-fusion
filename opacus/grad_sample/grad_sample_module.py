@@ -60,13 +60,13 @@ def create_or_accumulate_grad_sample(
         if hasattr(param, "_current_grad_sample"):
             param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
         else:
-            # param._current_grad_sample = torch.zeros(
-            #     torch.Size([max_batch_len]) + grad_sample.shape[1:],
-            #     device=grad_sample.device,
-            #     dtype=grad_sample.dtype,
-            # )
-            # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
-            param._current_grad_sample = grad_sample
+            param._current_grad_sample = torch.zeros(
+                torch.Size([max_batch_len]) + grad_sample.shape[1:],
+                device=grad_sample.device,
+                dtype=grad_sample.dtype,
+            )
+            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            # param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
@@ -403,31 +403,40 @@ class GradSampleModule(AbstractGradSampleModule):
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len
 
+        profiler.record("Backward weight")
+        # For reweight DP-SGD, compute norm of each parameters
+        for _, p in trainable_parameters(module):
+            if p._forward_counter == 0 and p.requires_grad_opacus:
+                p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
+
+        profiler.record("Clip and reduce")
+
         # Keep activations for later example-wise gradient computation
         if config.dpsgd_mode == MODE_ELEGANT:
-            if config.quantization and\
-                (isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)):
-                if isinstance(module, DPFASTLSTM):
-                    if module.bidirectional:
-                        m1, scale1 = batch_quantization_encode(activations[0], bit=8)
-                        m2, scale2 = batch_quantization_encode(activations[1], bit=8)
-                        m3, scale3 = batch_quantization_encode(activations[2], bit=8)
-                        module.activations = [m1, m2, m3]
-                        module.activations_scale = [scale1, scale2, scale3]
+            if not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.GroupNorm):
+                if config.quantization and\
+                    (isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)):
+                    if isinstance(module, DPFASTLSTM):
+                        if module.bidirectional:
+                            m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                            m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                            m3, scale3 = batch_quantization_encode(activations[2], bit=8)
+                            module.activations = [m1, m2, m3]
+                            module.activations_scale = [scale1, scale2, scale3]
+                        else:
+                            m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                            m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                            module.activations = [m1, m2]
+                            module.activations_scale = [scale1, scale2]
                     else:
-                        m1, scale1 = batch_quantization_encode(activations[0], bit=8)
-                        m2, scale2 = batch_quantization_encode(activations[1], bit=8)
-                        module.activations = [m1, m2]
-                        module.activations_scale = [scale1, scale2]
+                        m, scale = batch_quantization_encode(activations, bit=8)
+                        module.activations = [m]
+                        module.activations_scale = scale
                 else:
-                    m, scale = batch_quantization_encode(activations, bit=8)
-                    module.activations = [m]
-                    module.activations_scale = scale
-            else:
-                if isinstance(module, DPFASTLSTM):
-                    module.activations = activations
-                else:
-                    module.activations = [activations]
+                    if isinstance(module, DPFASTLSTM):
+                        module.activations = activations
+                    else:
+                        module.activations = [activations]
 
         profiler.record("Backward weight")
 
@@ -464,11 +473,13 @@ class GradSampleModule(AbstractGradSampleModule):
                 module.activations = []
             if config.dpsgd_mode == MODE_ELEGANT:
                 activations = module.activations
+                module.activations = []
         else:
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 activations = module.activations.pop()
             if config.dpsgd_mode == MODE_ELEGANT:
-                activations = module.activations[0]
+                # activations = module.activations[0]
+                activations = module.activations.pop()
 
         if not hasattr(module, "max_batch_len"):
             # For packed sequences, max_batch_len is set in the forward of the model (e.g. the LSTM)

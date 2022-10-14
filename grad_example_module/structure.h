@@ -182,4 +182,8 @@ struct LinearDescriptor {
     torch::Tensor tensor_for_B_array;
     torch::Tensor tensor_for_C_array;    
 
+    std::vector<void *> host_A_array;
+    std::vector<void *> host_B_array;
+    std::vector<void *> host_C_array;
+
 };

@@ -77,3 +77,27 @@ std::vector<torch::Tensor> quantize_int8(torch::Tensor m) {
 
   return {q, scale};
 }
+
+__global__ void int32_to_float32_cuda_kernel(
+    int32_t *m,
+    float *out,
+    int n) {
+  // column index
+  const int c = blockIdx.x * blockDim.x + threadIdx.x;
+  if (c < n){
+    out[c] = (float)m[c];
+  }
+}
+
+void int32_to_float32(torch::Tensor m, torch::Tensor out, int n) {
+
+  const int threads = 1024;
+  const dim3 blocks((n + threads - 1) / threads, 1);
+
+  int32_to_float32_cuda_kernel<<<blocks, threads>>>(
+      (int32_t *)m.data_ptr(),
+      (float *)out.data_ptr(),
+      n);
+
+  return;
+}
