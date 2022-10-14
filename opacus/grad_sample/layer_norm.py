@@ -43,15 +43,16 @@ def compute_layer_norm_grad_sample(
         activations: Activations
         backprops: Backpropagations
     """
+    backprops = GradOutputs(backprops)
     profiler.record("Backward weight")
 
     ret = {}
     if layer.weight.requires_grad_opacus:
-        gs = sum_over_all_but_batch_and_last_n(
+        gs = PerSampleGrads(sum_over_all_but_batch_and_last_n(
             F.layer_norm(activations, layer.normalized_shape, eps=layer.eps)
             * backprops,
             layer.weight.dim(),
-        )
+        ))
         profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
             ret[layer.weight] = PerSampleGrads(gs)

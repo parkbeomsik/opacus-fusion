@@ -37,6 +37,7 @@ from opacus.utils.quant_utils import batch_quantization_encode
 from opacus.profiler import profiler
 from opacus.layers import dp_fast_rnn
 from opacus.layers.dp_fast_rnn import DPFASTLSTM
+from opacus.custom_tensor import GradOutputs
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +373,7 @@ class GradSampleModule(AbstractGradSampleModule):
             backprops = dp_fast_rnn.output_grads
             dp_fast_rnn.output_grads = []
         else:
-            backprops = forward_output[0].detach()
+            backprops = GradOutputs(forward_output[0].detach())
         activations, backprops = self.rearrange_grad_samples(
             module=module,
             backprops=backprops,

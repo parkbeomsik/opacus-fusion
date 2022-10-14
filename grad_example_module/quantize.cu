@@ -65,7 +65,7 @@ std::vector<torch::Tensor> quantize_int8(torch::Tensor m) {
   unsigned long long seed = dis(gen);
 
   AT_DISPATCH_FLOATING_TYPES(m.type(), "quantize_int8_cuda_kernel", ([&] {
-    quantize_int8_cuda_kernel<scalar_t><<<blocks, threads0, 0, at::cuda::getCurrentCUDAStream().stream()>>>(
+    quantize_int8_cuda_kernel<scalar_t><<<blocks, threads, 0, at::cuda::getCurrentCUDAStream().stream()>>>(
         m.packed_accessor32<scalar_t,2,torch::RestrictPtrTraits>(),
         (float *)scale.data_ptr(),
         q.packed_accessor32<int8_t,2,torch::RestrictPtrTraits>(),

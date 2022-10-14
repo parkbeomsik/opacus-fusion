@@ -414,7 +414,7 @@ class DPOptimizer(Optimizer):
         """
 
         if config.dpsgd_mode == MODE_NAIVE:
-            profiler.record_memory()
+            # profiler.record_memory()
 
             per_param_norms = [
                 g.reshape(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
@@ -436,7 +436,7 @@ class DPOptimizer(Optimizer):
 
                 _mark_as_processed(p.grad_sample)
 
-            profiler.record_memory()
+            # profiler.record_memory()
 
         elif config.dpsgd_mode == MODE_REWEIGHT:
             # Collect gradient norms from all layers
@@ -1126,6 +1126,8 @@ class DPOptimizer(Optimizer):
             p.grad = (p.summed_grad + noise).view_as(p)
 
             _mark_as_processed(p.summed_grad)
+
+            p.summed_grad = None
 
     def scale_grad(self):
         """

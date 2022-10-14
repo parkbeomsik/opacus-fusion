@@ -334,7 +334,7 @@ def main():  # noqa: C901
             if args.model_type == "transformer":
                 output = model(*inputs, return_dict=False)[0]
             loss = criterion_func(output, target.cuda(non_blocking=True))
-            profiler.record("Forward")
+            profiler.record("Forward", input_activation=True)
 
             loss.backward()
             profiler.record("Backward activation")
@@ -400,16 +400,16 @@ def main():  # noqa: C901
         print("")
         print(profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]))  
         print("")
-        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv())
+        print(profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv())
 
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
 
     if not config.profile_time and not config.profile_memory:

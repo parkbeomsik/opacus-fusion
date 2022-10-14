@@ -5,32 +5,50 @@ import torch
 import time
 from collections import defaultdict
 import gc
+import traceback
 
 import pandas as pd
 
 from opacus.custom_tensor import PerBatchGrads, PerSampleGrads, GradOutputs
 
-def get_memory_usage():
+def get_memory_usage(input_activation=False):
     # Print all tensors
     gc.collect()
     memory_usage = defaultdict(int)
+    tracked_ptr_set = set()
     for obj in gc.get_objects():
         try:
             if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
-                and obj.device == "cuda:0":
+                and obj.get_device() == 0:
                 size_in_bytes = obj.numel() * obj.element_size()
                 if type(obj) == torch.Tensor:
-                    memory_usage["Input activations"] += size_in_bytes
-                if type(obj) == torch.nn.Parameter:
+                    if input_activation and (obj.data_ptr() not in tracked_ptr_set):
+                        memory_usage["Input activations"] += size_in_bytes
+                elif type(obj) == torch.nn.Parameter:
                     memory_usage["Weights"] += size_in_bytes
-                if type(obj) == PerSampleGrads:
+                elif type(obj) == PerSampleGrads:
                     memory_usage["Per-example weight gradients"] += size_in_bytes
-                if type(obj) == PerBatchGrads:
+                elif type(obj) == PerBatchGrads:
                     memory_usage["Per-batch weight gradients"] += size_in_bytes
-                if type(obj) == GradOutputs:
+                elif type(obj) == GradOutputs:
                     memory_usage["Activation gradients"] += size_in_bytes
+                tracked_ptr_set.add(obj.data_ptr())
         except:
             pass
+
+    # if memory_usage["Input activations"] > 18000000000:
+    #     traceback.print_stack()
+    #     for obj in gc.get_objects():
+    #         try:
+    #             if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
+    #                 and obj.get_device() == 0:
+    #                 size_in_bytes = obj.numel() * obj.element_size()
+    #                 if type(obj) == torch.Tensor:
+    #                     print(obj.shape)
+    #         except:
+    #             pass
+
+    #     exit(0)
 
     return memory_usage
 
@@ -74,19 +92,23 @@ class Profiler():
         torch.cuda.synchronize()
         self.start_interval_time = time.time()
 
-    def record_memory(self, type=""):
+    def record_memory(self, type="", input_activation=False):
         if config.profile_memory:
+            torch.cuda.synchronize()
             self.memory_records["Peak memory usage"] = torch.cuda.max_memory_allocated() # Bytes
-            memory_usage = get_memory_usage()
+            memory_usage = get_memory_usage(input_activation)
             for key in memory_usage:
+                if not input_activation and key == "Input activations":
+                    continue
                 self.memory_records[key] = max(memory_usage[key], self.memory_records[key])
+            torch.cuda.synchronize()
 
 
-    def record(self, type=""):
+    def record(self, type="", input_activation=False):
         if config.profile_time:
             self.record_time(type)
         if config.profile_memory:
-            self.record_memory(type)
+            self.record_memory(type, input_activation=input_activation)
 
     def time_as_df(self, index):
         time_data = [[self.time_records[key] / self.step_count for key in self.time_keys] + [self.peak_memory_usage]]
