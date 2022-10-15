@@ -403,13 +403,14 @@ class GradSampleModule(AbstractGradSampleModule):
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len
 
-        profiler.record("Backward weight")
         # For reweight DP-SGD, compute norm of each parameters
-        for _, p in trainable_parameters(module):
-            if p._forward_counter == 0 and p.requires_grad_opacus:
-                p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
+        if config.dpsgd_mode == MODE_REWEIGHT:
+            profiler.record("Backward weight")
+            for _, p in trainable_parameters(module):
+                if p._forward_counter == 0 and p.requires_grad_opacus:
+                    p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
 
-        profiler.record("Clip and reduce")
+            profiler.record("Clip and reduce")
 
         # Keep activations for later example-wise gradient computation
         if config.dpsgd_mode == MODE_ELEGANT:

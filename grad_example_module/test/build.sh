@@ -1,0 +1,1 @@
+nvcc -I/home/beomsik/dp/cutlass/include cutlass_int8_batched_gemm.cu -o test

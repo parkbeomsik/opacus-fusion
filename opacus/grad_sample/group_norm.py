@@ -48,28 +48,28 @@ def compute_group_norm_grad_sample(
     ret = {}
     if layer.weight.requires_grad_opacus:
         gs = PerSampleGrads(torch.einsum("ni...->ni", F.group_norm(activations, layer.num_groups, eps=layer.eps) * backprops))
-        if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
+        # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
             # ret[layer.weight] = PerSampleGrads(contract("ni...->ni", gs, backend="torch"))
-            ret[layer.weight] = gs
-            profiler.record("Backward weight")
-        if config.dpsgd_mode == MODE_REWEIGHT:
-            # gs = PerSampleGrads(contract("ni...->ni", gs, backend="torch"))
-            # gs = PerSampleGrads(torch.einsum("ni...->ni", gs))
-            profiler.record("Backward weight")
-            layer.weight.grad_sample_norms = [gs.norm(2, dim=1)]
-            profiler.record("Clip/reduce")
+        ret[layer.weight] = gs
+        profiler.record("Backward weight")
+        # if config.dpsgd_mode == MODE_REWEIGHT:
+        #     # gs = PerSampleGrads(contract("ni...->ni", gs, backend="torch"))
+        #     # gs = PerSampleGrads(torch.einsum("ni...->ni", gs))
+        #     profiler.record("Backward weight")
+        #     layer.weight.grad_sample_norms = [gs.norm(2, dim=1)]
+        #     profiler.record("Clip/reduce")
 
     if layer.bias is not None and layer.bias.requires_grad_opacus:
-        if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
+        # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
             # ret[layer.bias] = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))
-            ret[layer.bias] = PerSampleGrads(torch.einsum("ni...->ni", backprops))
-            profiler.record("Backward weight")
-        if config.dpsgd_mode == MODE_REWEIGHT:
-            # backprops = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))
-            backprops = PerSampleGrads(torch.einsum("ni...->ni", backprops))
-            profiler.record("Backward weight")
-            layer.bias.grad_sample_norms = [backprops.norm(2, dim=1)]
-            profiler.record("Clip/reduce")
+        ret[layer.bias] = PerSampleGrads(torch.einsum("ni...->ni", backprops))
+        profiler.record("Backward weight")
+        # if config.dpsgd_mode == MODE_REWEIGHT:
+        #     # backprops = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))
+        #     backprops = PerSampleGrads(torch.einsum("ni...->ni", backprops))
+        #     profiler.record("Backward weight")
+        #     layer.bias.grad_sample_norms = [backprops.norm(2, dim=1)]
+        #     profiler.record("Clip/reduce")
 
     # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
     #     del activations

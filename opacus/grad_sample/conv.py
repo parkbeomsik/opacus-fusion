@@ -124,25 +124,25 @@ def compute_conv_grad_sample(
             profiler.record("Backward weight")
 
             shape = [n] + list(layer.weight.shape)
-            if config.dpsgd_mode == MODE_NAIVE:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight] = PerSampleGrads(grad_sample.view(shape))
-            if config.dpsgd_mode == MODE_REWEIGHT:
-                if type(layer) == nn.Conv2d:
-                    reduce_dims = (1, 2, 3, 4)
-                elif type(layer) == nn.Conv1d:
-                    reduce_dims = (1, 2, 3) 
-                layer.weight.grad_sample_norms = [grad_sample.view(shape).norm(2, dim=reduce_dims)]
-                profiler.record("Clip/reduce")
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     if type(layer) == nn.Conv2d:
+            #         reduce_dims = (1, 2, 3, 4)
+            #     elif type(layer) == nn.Conv1d:
+            #         reduce_dims = (1, 2, 3) 
+            #     layer.weight.grad_sample_norms = [grad_sample.view(shape).norm(2, dim=reduce_dims)]
+            #     profiler.record("Clip/reduce")
 
     if layer.bias is not None and layer.bias.requires_grad_opacus:
-        if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
-            ret[layer.bias] = PerSampleGrads(torch.sum(backprops, dim=2))
-            profiler.record("Backward weight")
-        if config.dpsgd_mode == MODE_REWEIGHT:
-            backprops = PerSampleGrads(torch.sum(backprops, dim=2))
-            profiler.record("Backward weight")
-            layer.bias.grad_sample_norms = [backprops.norm(2, dim=(1,))]
-            profiler.record("Clip/reduce")
+        # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
+        ret[layer.bias] = PerSampleGrads(torch.sum(backprops, dim=2))
+        profiler.record("Backward weight")
+        # if config.dpsgd_mode == MODE_REWEIGHT:
+        #     backprops = PerSampleGrads(torch.sum(backprops, dim=2))
+        #     profiler.record("Backward weight")
+        #     layer.bias.grad_sample_norms = [backprops.norm(2, dim=(1,))]
+        #     profiler.record("Clip/reduce")
 
     if config.model_type == "rnn" and config.dpsgd_mode == MODE_NAIVE:
         config.dpsgd_mode = origin_mode

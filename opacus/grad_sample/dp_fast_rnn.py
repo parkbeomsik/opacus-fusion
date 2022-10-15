@@ -72,59 +72,59 @@ def compute_rnn_grad_sample(
         if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
             gs = contract("n...i,n...j->nij", grad_gates, i_actv)
             profiler.record("Backward weight")
-            if config.dpsgd_mode == MODE_NAIVE:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight_ih] = PerSampleGrads(gs)
-            if config.dpsgd_mode == MODE_REWEIGHT:
-                layer.weight_ih.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
-                profiler.record("Clip/reduce")
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     layer.weight_ih.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
+            #     profiler.record("Clip/reduce")
 
     if layer.weight_hh.requires_grad_opacus:
         if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
             gs = contract("n...i,n...j->nij", grad_gates, h_actv)
             profiler.record("Backward weight")
-            if config.dpsgd_mode == MODE_NAIVE:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight_hh] = PerSampleGrads(gs)
-            if config.dpsgd_mode == MODE_REWEIGHT:
-                layer.weight_hh.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
-                profiler.record("Clip/reduce")            
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     layer.weight_hh.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
+            #     profiler.record("Clip/reduce")            
 
     if layer.bias is not None and layer.bias.requires_grad_opacus:
         contracted_backprops = PerSampleGrads(contract("n...k->nk", grad_gates))
         profiler.record("Backward weight")
-        if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
-            ret[layer.bias] = contracted_backprops
-        if config.dpsgd_mode == MODE_REWEIGHT:
-            layer.bias.grad_sample_norms = [contracted_backprops.norm(2, dim=1)]
-            profiler.record("Clip/reduce")
+        # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
+        ret[layer.bias] = contracted_backprops
+        # if config.dpsgd_mode == MODE_REWEIGHT:
+        #     layer.bias.grad_sample_norms = [contracted_backprops.norm(2, dim=1)]
+        #     profiler.record("Clip/reduce")
 
     if layer.bidirectional:
         if layer.weight_ih_reverse.requires_grad_opacus:
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 gs = contract("n...i,n...j->nij", grad_gates, i_actv)
                 profiler.record("Backward weight")
-                if config.dpsgd_mode == MODE_NAIVE:
+                if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                     ret[layer.weight_ih_reverse] = PerSampleGrads(gs)
-                if config.dpsgd_mode == MODE_REWEIGHT:
-                    layer.weight_ih_reverse.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
-                    profiler.record("Clip/reduce")
+                # if config.dpsgd_mode == MODE_REWEIGHT:
+                #     layer.weight_ih_reverse.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
+                #     profiler.record("Clip/reduce")
 
         if layer.weight_hh_reverse.requires_grad_opacus:
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 gs = contract("n...i,n...j->nij", grad_gates, h_actv_reverse)
                 profiler.record("Backward weight")
-                if config.dpsgd_mode == MODE_NAIVE:
+                if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                     ret[layer.weight_hh_reverse] = PerSampleGrads(gs)
-                if config.dpsgd_mode == MODE_REWEIGHT:
-                    layer.weight_hh_reverse.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
-                    profiler.record("Clip/reduce")            
+                # if config.dpsgd_mode == MODE_REWEIGHT:
+                #     layer.weight_hh_reverse.grad_sample_norms = [gs.norm(2, dim=(1, 2))]
+                #     profiler.record("Clip/reduce")            
 
         if layer.bias_reverse is not None and layer.bias_reverse.requires_grad_opacus:
             contracted_backprops = PerSampleGrads(contract("n...k->nk", grad_gates_reverse))
             profiler.record("Backward weight")
-            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
-                ret[layer.bias_reverse] = contracted_backprops
-            if config.dpsgd_mode == MODE_REWEIGHT:
-                layer.bias_reverse.grad_sample_norms = [contracted_backprops.norm(2, dim=1)]
-                profiler.record("Clip/reduce")
+            # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
+            ret[layer.bias_reverse] = contracted_backprops
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     layer.bias_reverse.grad_sample_norms = [contracted_backprops.norm(2, dim=1)]
+            #     profiler.record("Clip/reduce")
 
     return ret

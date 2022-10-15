@@ -568,6 +568,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
 
+  printf("Finish C++, %lld\n", std::chrono::high_resolution_clock::now().time_since_epoch().count());
+
   return ReturnType({flat_per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_last_grads, per_batch_embedding_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, 0);
 }
 

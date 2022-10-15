@@ -66,13 +66,13 @@ def compute_embedding_grad_sample(
             )
             grad_sample = PerSampleGrads(grad_sample)
             torch.backends.cudnn.deterministic = saved
-            if config.dpsgd_mode == MODE_NAIVE:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight] = grad_sample
 
             profiler.record("Backward weight")
 
-            if config.dpsgd_mode == MODE_REWEIGHT:
-                layer.weight.grad_sample_norms = [grad_sample.norm(2, dim=(1, 2))]
-                profiler.record("Clip/reduce")
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     layer.weight.grad_sample_norms = [grad_sample.norm(2, dim=(1, 2))]
+            #     profiler.record("Clip/reduce")
 
     return ret
