@@ -1,0 +1,64 @@
+#include <vector>
+#include <iostream>
+
+#include "cutlass/cutlass.h"
+#include "cutlass/gemm/gemm.h"
+#include "cutlass/gemm/device/gemm_array.h"
+#include "cutlass/gemm/threadblock/threadblock_swizzle.h"
+
+#include "cuda_runtime.h"
+
+cudaError_t cutlass_simt_igemm_int8_batched_gemm(
+  int m,
+  int n,
+  int k,
+  float alpha,
+  int8_t const * const *A,
+  int lda,
+  int8_t const * const *B,
+  int ldb,
+  float * const *C,
+  int ldc,
+  float beta,
+  int batch_count,
+  cudaStream_t stream) {  
+
+  using namespace cutlass::gemm::device;
+
+  using Gemm = cutlass::gemm::device::GemmArray<
+    int8_t, cutlass::layout::ColumnMajor,
+    int8_t, cutlass::layout::ColumnMajor,
+    float, cutlass::layout::ColumnMajor,
+    int32_t,
+    cutlass::arch::OpClassSimt,
+    cutlass::arch::Sm75,
+    cutlass::gemm::GemmShape<128, 256, 32>,
+    cutlass::gemm::GemmShape<32, 128, 32>,
+    cutlass::gemm::GemmShape<1, 1, 4>,
+    cutlass::epilogue::thread::LinearCombination<
+      float, 
+      1,
+      int32_t, 
+      float
+    >
+  >;
+
+  Gemm gemm_op;
+
+  Gemm::Arguments args(cutlass::gemm::GemmCoord(m, n, k),
+                       A, cutlass::layout::ColumnMajor(lda),
+                       B, cutlass::layout::ColumnMajor(ldb),
+                       C, cutlass::layout::ColumnMajor(ldc),
+                       C, cutlass::layout::ColumnMajor(ldc),
+                       Gemm::EpilogueOutputOp::Params(alpha, beta),
+                       batch_count);
+
+  cutlass::Status status = gemm_op(args, nullptr, stream);
+
+  if (status != cutlass::Status::kSuccess) {
+    std::cout << cutlassGetStatusString(status) << std::endl;
+    return cudaErrorUnknown;
+  }
+
+  return cudaSuccess;
+}

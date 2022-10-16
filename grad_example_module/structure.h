@@ -11,10 +11,12 @@ struct ReturnType {
              float backward_weight_ms,
              float norm_ms,
              float clip_reduce_ms,
+             float add_noise_ms,
              size_t peak_memory_usage):
              per_batch_grads(per_batch_grads),
              backward_weight_ms(backward_weight_ms),
              norm_ms(norm_ms),
+             add_noise_ms(add_noise_ms),
              clip_reduce_ms(clip_reduce_ms),
              peak_memory_usage(peak_memory_usage) {};
 
@@ -31,12 +33,16 @@ struct ReturnType {
   float get_clip_reduce_ms() {
     return clip_reduce_ms;
   } 
+  float get_add_noise_ms() {
+    return add_noise_ms;
+  } 
 
   std::vector<std::vector<torch::Tensor>> per_batch_grads;
   
   float backward_weight_ms;
   float norm_ms;
   float clip_reduce_ms;
+  float add_noise_ms;
 
   size_t peak_memory_usage;
 };

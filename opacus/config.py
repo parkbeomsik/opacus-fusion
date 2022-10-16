@@ -17,6 +17,8 @@ batch_size = 0
 
 verbose = True
 
+precomputed_grads = None
+
 
 # Profiler
 profile_time = True

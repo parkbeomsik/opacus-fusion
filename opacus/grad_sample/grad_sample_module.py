@@ -410,6 +410,8 @@ class GradSampleModule(AbstractGradSampleModule):
                 if p._forward_counter == 0 and p.requires_grad_opacus:
                     p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
 
+                    del p.grad_sample
+
             profiler.record("Clip and reduce")
 
         # Keep activations for later example-wise gradient computation

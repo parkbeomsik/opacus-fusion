@@ -1,3 +1,4 @@
+
 #include <vector>
 
 #include "cutlass/cutlass.h"
@@ -33,8 +34,8 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
     int32_t,
     cutlass::arch::OpClassSimt,
     cutlass::arch::Sm75,
-    cutlass::gemm::GemmShape<64, 64, 32>,
-    cutlass::gemm::GemmShape<32, 32, 32>,
+    cutlass::gemm::GemmShape<256, 128, 64>,
+    cutlass::gemm::GemmShape<32, 128, 64>,
     cutlass::gemm::GemmShape<1, 1, 4>,
     cutlass::epilogue::thread::LinearCombination<
       float, 
@@ -65,9 +66,9 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
 
 int main(void) {
   int m = 768;
-  int n = 3072;
-  int k = 32;
-  int batch_count = 32;
+  int n = 768;
+  int k = 256;
+  int batch_count = 48;
 
   std::vector<void *> host_A_array(batch_count, NULL);
   std::vector<void *> host_B_array(batch_count, NULL);
@@ -78,7 +79,7 @@ int main(void) {
     checkCudaErrors(cudaMalloc(&host_B_array[i], sizeof(int8_t)*k*n));
     checkCudaErrors(cudaMalloc(&host_C_array[i], sizeof(float)*m*n));
   }
-
+  
   void * device_A_array;
   void * device_B_array;
   void * device_C_array;
@@ -112,17 +113,17 @@ int main(void) {
 
   // Measure runtime_ms
   for (int i = 0; i < 20; ++i) {
-    cutlass_simt_igemm_int8_batched_gemm(m, n, k,
-                                         1.0,
-                                         (int8_t **)device_A_array,
-                                         m,
-                                         (int8_t **)device_B_array,
-                                         k,
-                                         (float **)device_C_array,
-                                         m,
-                                         0.0,
-                                         batch_count,
-                                         NULL);
+    checkCudaErrors(cutlass_simt_igemm_int8_batched_gemm(m, n, k,
+                                                        1.0,
+                                                        (int8_t **)device_A_array,
+                                                        m,
+                                                        (int8_t **)device_B_array,
+                                                        k,
+                                                        (float **)device_C_array,
+                                                        m,
+                                                        0.0,
+                                                        batch_count,
+                                                        NULL));
   }
 
   checkCudaErrors(cudaEventRecord(events[1]));
@@ -132,4 +133,4 @@ int main(void) {
   checkCudaErrors(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
 
   std::cout << runtime_ms / 20.0 << std::endl;
-} 
+}

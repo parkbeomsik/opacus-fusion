@@ -741,7 +741,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
 
-  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, 0);
+  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, 0.0, 0);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////

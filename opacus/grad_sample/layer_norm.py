@@ -54,21 +54,10 @@ def compute_layer_norm_grad_sample(
             layer.weight.dim(),
         ))
         profiler.record("Backward weight")
-        # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
         ret[layer.weight] = PerSampleGrads(gs)
-            
-        # if config.dpsgd_mode == MODE_REWEIGHT:
-        #     layer.weight.grad_sample_norms = [gs.norm(2, dim=1)]
-        #     profiler.record("Clip/reduce")
 
     if layer.bias.requires_grad_opacus:
-        # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
         ret[layer.bias] = PerSampleGrads(sum_over_all_but_batch_and_last_n(backprops, layer.bias.dim()))
         profiler.record("Backward weight")
-        # if config.dpsgd_mode == MODE_REWEIGHT:
-        #     backprops = PerSampleGrads(sum_over_all_but_batch_and_last_n(backprops, layer.bias.dim()))
-        #     profiler.record("Backward weight")
-        #     layer.bias.grad_sample_norms = [backprops.norm(2, dim=1)]
-        #     profiler.record("Clip/reduce")
 
     return ret
