@@ -34,8 +34,8 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
     int32_t,
     cutlass::arch::OpClassSimt,
     cutlass::arch::Sm75,
-    cutlass::gemm::GemmShape<256, 128, 64>,
-    cutlass::gemm::GemmShape<32, 128, 64>,
+    cutlass::gemm::GemmShape<256, 256, 64>,
+    cutlass::gemm::GemmShape<256, 256, 64>,
     cutlass::gemm::GemmShape<1, 1, 4>,
     cutlass::epilogue::thread::LinearCombination<
       float, 

@@ -414,7 +414,7 @@ class DPOptimizer(Optimizer):
         """
 
         if config.dpsgd_mode == MODE_NAIVE:
-            # profiler.record_memory()
+            profiler.record_memory()
 
             per_param_norms = [
                 g.reshape(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
@@ -427,7 +427,10 @@ class DPOptimizer(Optimizer):
             for p in self.params:
                 _check_processed_flag(p.grad_sample)
                 grad_sample = self._get_flat_grad_sample(p)
-                grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
+                # grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
+                grad = contract("i,i...", per_sample_clip_factor, grad_sample)
+                # batch_size = grad_sample.shape[0]
+                # grad = torch.sum(per_sample_clip_factor.view(batch_size, *list(1 for _ in range(1, len(grad_sample.shape)))) * grad_sample, dim=0)
 
                 if p.summed_grad is not None:
                     p.summed_grad += PerBatchGrads(grad)
@@ -436,7 +439,7 @@ class DPOptimizer(Optimizer):
 
                 _mark_as_processed(p.grad_sample)
 
-            # profiler.record_memory()
+            profiler.record_memory()
 
         elif config.dpsgd_mode == MODE_REWEIGHT:
             # Collect gradient norms from all layers
