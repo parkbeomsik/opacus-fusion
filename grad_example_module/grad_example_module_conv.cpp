@@ -60,6 +60,10 @@ void ** device_ptr_D = NULL;
 // void ** host_ptr_B = NULL;
 // void ** host_ptr_C = NULL;
 // void ** host_ptr_D = NULL;
+std::vector<void *> host_ptr_A;
+std::vector<void *> host_ptr_B;
+std::vector<void *> host_ptr_C;
+std::vector<void *> host_ptr_D;
 
 cutlass_wgrad_grouped::OperationWithWorkspace best_operation_with_workspace;
 
@@ -83,7 +87,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
   cudnnDataType_t dtype = CUDNN_DATA_FLOAT;
 
   size_t total_ws_size = 0;
-  // this->batch_size = trainable_layer_list.at(0)->get_input_shape()[0];
+  
   for (size_t i=0; i < configs.size(); ++i) {
     auto config = &configs.at(i);
     // Generate cuDNN descriptors
@@ -266,6 +270,25 @@ void set_cudnn_workspace(size_t end_cudnn_layer) {
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+void set_per_batch_cudnn_workspace(size_t end_non_reweight_layer) {
+  for (size_t i=0; i < descriptors.size(); ++i) {
+    descriptors.at(i).tensor_for_batch_workspace_ptr = torch::empty({0});
+    descriptors.at(i).batch_workspace_ptr = NULL;
+    if (i >= end_non_reweight_layer) {
+      if(descriptors.at(i).bwd_filter_batch_algo_best_workspace_size > 0) {
+        descriptors.at(i).tensor_for_batch_workspace_ptr = torch::empty({(int64_t)descriptors.at(i).bwd_filter_batch_algo_best_workspace_size}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kChar));
+        descriptors.at(i).batch_workspace_ptr = descriptors.at(i).tensor_for_batch_workspace_ptr.data_ptr();
+      }
+      else {
+        descriptors.at(i).batch_workspace_ptr = NULL;
+      }
+    }
+  } 
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
 void set_cutlass_workspace(size_t end_cudnn_layer, int batch_size) {
   // Set device workspace which stores device pointers
 
@@ -336,20 +359,29 @@ void set_cutlass_device_ptrs(size_t end_cudnn_layer,
 
   size_t batch_size = (size_t)_batch_size;
 
-  std::vector<void *> host_ptr_A;
-  std::vector<void *> host_ptr_B;
-  std::vector<void *> host_ptr_C;
-  std::vector<void *> host_ptr_D;
+  host_ptr_A.clear();
+  host_ptr_B.clear();
+  host_ptr_C.clear();
+  host_ptr_D.clear();
   host_ptr_A.resize(batch_size*problem_count);
   host_ptr_B.resize(batch_size*problem_count);
   host_ptr_C.resize(problem_count);
   host_ptr_D.resize(problem_count);
 
+  for (size_t problem_idx = 0; problem_idx < problem_count; ++problem_idx) {
+    float * ograds_ptr = (float *)ograds.at(end_cudnn_layer + problem_idx).data_ptr();
+    float * actvs_ptr = (float *)actvs.at(end_cudnn_layer + problem_idx).data_ptr();
+    size_t ograds_offset = ograds.at(end_cudnn_layer + problem_idx).numel() / batch_size;
+    size_t actvs_offset = actvs.at(end_cudnn_layer + problem_idx).numel() / batch_size;
 
-  for (size_t example_idx = 0; example_idx < batch_size; ++example_idx) {
-    for (size_t problem_idx = 0; problem_idx < problem_count; ++problem_idx) {
-      host_ptr_A[example_idx*problem_count + problem_idx] = ograds.at(end_cudnn_layer + problem_idx).index({(int64_t)example_idx}).data_ptr();
-      host_ptr_B[example_idx*problem_count + problem_idx] = actvs.at(end_cudnn_layer + problem_idx).index({(int64_t)example_idx}).data_ptr();
+    // std::cout << ograds.at(end_cudnn_layer + problem_idx).is_contiguous() << std::endl;
+    // std::cout << actvs.at(end_cudnn_layer + problem_idx).is_contiguous() << std::endl;
+
+    for (size_t example_idx = 0; example_idx < batch_size; ++example_idx) {
+      host_ptr_A[example_idx*problem_count + problem_idx] = ograds_ptr;
+      host_ptr_B[example_idx*problem_count + problem_idx] = actvs_ptr;
+      ograds_ptr += ograds_offset;
+      actvs_ptr += actvs_offset;
     }
   }
 
@@ -481,30 +513,9 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
                                    float max_norm) {
   
   using namespace torch::indexing;
-  // for (int i=0; i < partial_sums.sizes()[0]; ++i) {
-  //   if (i == 0) {
-      // torch::Tensor partial_sum = partial_sums.index({0});
-      // torch::frobenius_norm_out(partial_sum, partial_per_example_gradient, {0}, false);
-  //   }
-  //   else {
-  //     torch::Tensor partial_sum = partial_sums.index({i});
-  //     torch::frobenius_norm_out(partial_sum, precomputed_per_example_grad_norms.at(i - 1).index({example_idx}), {0}, false);
-  //   }
-  // }
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {0}, false);
-  // torch::Tensor norm = torch::empty({1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  // checkCUBLAS(cublasSnrm2(cublas_handles[0],
-  //                         partial_per_example_gradient.sizes()[0],
-  //                         (float *)partial_per_example_gradient.data_ptr(),
-  //                         1,
-  //                         (float *)norm.data_ptr()));
-
   compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm);
-  // checkCudaErrors(cudaDeviceSynchronize());
-  // torch::cuda::synchronize();
-
-  // scaling_factors.index_put_({example_idx}, (max_norm / (norm + 1e-6)).clamp(0.0, 1.0));
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -563,6 +574,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                                   size_t end_cudnn_layer,
                                                                   int batch_count = 0,
                                                                   float max_norm = 1.0,
+                                                                  float noise_multiplier = 1.0,
                                                                   bool quant = false,
                                                                   bool verbose = false,
                                                                   bool time_profile = false,
@@ -574,10 +586,30 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float backward_weight_ms = 0.0;
   float norm_ms = 0.0;
   float clip_reduce_ms = 0.0;
+  float add_noise_ms = 0.0;
 
   auto partial_per_example_gradient = torch::empty({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   auto partial_per_example_gradient2 = torch::empty({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   
+  // Put precomputed_norm at last to compute norm of total gradient
+  // To compute clip and reduce efficiently, gather all precomputed grads into a single tensor
+  int64_t gathered_per_example_grads_size = 0;
+  for (size_t i = 0; i < precomputed_per_example_grads.size(); ++i) {
+    gathered_per_example_grads_size += precomputed_per_example_grads.at(i).numel() / batch_count;
+  }
+  auto gathered_per_example_grads = torch::empty({batch_count, gathered_per_example_grads_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));\
+  {
+    int64_t offset = 0;
+    for (size_t i = 0; i < precomputed_per_example_grads.size(); ++i) {
+      gathered_per_example_grads.index_put_({Slice(), Slice(offset, offset + precomputed_per_example_grads.at(i).numel() / batch_count)},
+                                            precomputed_per_example_grads.at(i).view({batch_count, -1}));
+      offset += precomputed_per_example_grads.at(i).numel() / batch_count;
+    }
+  }
+  gathered_per_example_grads.index_put_({Slice(), gathered_per_example_grads_size}, precomputed_per_example_grad_norms.at(0));
+  auto precomputed_per_example_norms = torch::frobenius_norm(gathered_per_example_grads, {1});
+  gathered_per_example_grads = gathered_per_example_grads.index({Slice(0, batch_count), Slice(0, gathered_per_example_grads_size)});
+
   // Set CUTLASS device pointers
   if (descriptors.size() - end_cudnn_layer > 0) {
     std::vector<void *> wgrads_ptrs;
@@ -597,7 +629,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   }
 
   auto partial_per_example_gradient_decoded = torch::zeros({(int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-  auto per_batch_gradient = torch::zeros({(int)non_reweight_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto per_batch_gradient = torch::zeros({(int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
 
   // Workspace to store scaling factors
   auto scaling_factors = torch::empty({batch_count}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -608,6 +640,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   LOG_STDERR("Compute per-example gradients and scaling factors", verbose);
   // Compute per-example gradients and scaling factors
   for (int example_idx = 0; example_idx < batch_count; ++example_idx) {
+    partial_per_example_gradient.index_put_({(int64_t)partial_per_example_gradient_size}, precomputed_per_example_norms.index({example_idx}));
+
     // Compute wgrad of front layers using cuDNN
     LOG_STDERR("Compute wgrad of back layers using CUTLASS", verbose);
     // Compute wgrad of back layers using CUTLASS
@@ -642,7 +676,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       //                         1,
       //                         (float *)per_batch_gradient.data_ptr(),
       //                         1));
-      per_batch_gradient.add(partial_per_example_gradient.index({Slice(0, (int)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
+      auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)non_reweight_per_example_gradient_size)});
+      partial_per_batch_gradient.add(partial_per_example_gradient.index({Slice(0, (int)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
     }
 
     // torch::cuda::synchronize();
@@ -651,14 +686,33 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
 
   // Scale and reduce pre-computed per-example grads
   LOG_STDERR("Scale and reduce pre-computed per-example grads", verbose);
-  std::vector<torch::Tensor> per_batch_grads_from_precomputed;
+  int64_t per_batch_gradient_from_precomputed_size = 0;
+  std::vector<int64_t> per_batch_gradient_sizes_from_precomputed;
   for (auto grad : precomputed_per_example_grads) {
-    std::vector<int64_t> scaling_factors_shape;
-    scaling_factors_shape.push_back(scaling_factors.size(0));
-    for (size_t i = 0; i < grad.sizes().size() - 1; ++i){
-      scaling_factors_shape.push_back(1);
+    int64_t gradient_size = grad.numel();
+    per_batch_gradient_from_precomputed_size += gradient_size / batch_count;
+    per_batch_gradient_sizes_from_precomputed.push_back(gradient_size / batch_count);
+  }
+  auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads * scaling_factors.view({batch_count, 1}), {0});
+  TIME_PROFILE(clip_reduce_ms, time_profile);
+  per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  TIME_PROFILE(add_noise_ms, time_profile);
+
+  std::vector<torch::Tensor> per_batch_grads_from_precomputed;
+  {
+    int offset = 0;
+    for (int grad_idx = 0; grad_idx < precomputed_per_example_grads.size(); ++grad_idx) {
+      auto& grad = precomputed_per_example_grads.at(grad_idx);
+
+      std::vector<int64_t> grad_shape;
+      for (size_t i = 1; i < grad.sizes().size(); ++i){
+        grad_shape.push_back(grad.sizes()[i]);
+      }
+      
+      per_batch_grads_from_precomputed.push_back(per_batch_gradient_from_precomputed.index({Slice(offset, offset + per_batch_gradient_sizes_from_precomputed.at(grad_idx))}).view(grad_shape));
+      
+      offset += per_batch_gradient_sizes_from_precomputed.at(grad_idx);
     }
-    per_batch_grads_from_precomputed.push_back(torch::sum(grad * scaling_factors.view(scaling_factors_shape), {0}));
   }
 
   // Scale output grads
@@ -692,13 +746,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   LOG_STDERR("Split finished per-batch gradients and add to list", verbose);
   int64_t offset = 0;
   for (size_t i = 0; i < descriptors.size(); ++i) {
-    if (i < end_non_reweight_layer) {
-      per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
-      offset += descriptors.at(i).grad_weight_per_example_size;
-    }
-    else {
-      per_batch_grads.push_back(torch::empty(descriptors.at(i).filter_shape, torch::TensorOptions().device(torch::kCUDA, 0)));
-    }
+    per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
+    offset += descriptors.at(i).grad_weight_per_example_size;
   }
   assert(per_batch_grads.size() == descriptors.size());
 
@@ -712,7 +761,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     // Compute per-batch gradient for rewight layers
     Conv2dDescriptor& descriptor = descriptors.at(i);
 
-    checkCUDNN(cudnnConvolutionBackwardFilter(at::native::getCudnnHandle(),
+    checkCUDNN(cudnnConvolutionBackwardFilter(cudnn_handles[i % _N_CUDA_STREAMS],
                                               &alpha,
                                               descriptor.input_batch_desc,
                                               actvs.at(i).data_ptr(),
@@ -720,28 +769,34 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                               ograds.at(i).data_ptr(),
                                               descriptor.conv_desc,
                                               descriptor.bwd_filter_batch_algo_best,
-                                              bwd_filter_batch_workspace,
-                                              max_bwd_filter_batch_algo_best_workspace_size,
+                                              descriptor.batch_workspace_ptr,
+                                              descriptor.bwd_filter_batch_algo_best_workspace_size,
                                               &beta,
                                               descriptor.filter_desc,
                                               per_batch_grads.at(i).data_ptr()));
   }
-
+  TIME_PROFILE(clip_reduce_ms, time_profile);
+  per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  TIME_PROFILE(add_noise_ms, time_profile);
   // checkCudaErrors(cudaDeviceSynchronize());
 
   std::vector<torch::Tensor> per_batch_linear_grads;
   // Split finished per-batch gradients and add to list
-  LOG_STDERR("Split finished per-batch gradients and add to list", verbose);
+  LOG_STDERR("Split finished per-batch gradients for linear and add to list", verbose);
   for (size_t i = 0; i < linear_actvs.size(); ++i) {
     per_batch_linear_grads.push_back(torch::empty({linear_ograds.at(i).sizes()[1], linear_actvs.at(i).sizes()[1]}, torch::TensorOptions().device(torch::kCUDA, 0)));
   }
+  
   for (size_t i = 0; i < linear_actvs.size(); ++i) {
     torch::matmul_out(per_batch_linear_grads.at(i), linear_ograds.at(i).transpose(0, 1), linear_actvs.at(i));
+    TIME_PROFILE(clip_reduce_ms, time_profile);
+    per_batch_linear_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    TIME_PROFILE(add_noise_ms, time_profile);
   }
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
 
-  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, 0.0, 0);
+  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, 0);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -756,6 +811,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                           std::vector<torch::Tensor>& linear_ograds,
                                           int batch_count,
                                           float max_norm,
+                                          float noise_multiplier,
                                           bool quant,
                                           bool verbose,
                                           bool profile_time,
@@ -894,6 +950,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
           non_reweight_per_example_gradient_size += (size_t)configs.at(i).K*configs.at(i).C*configs.at(i).R*configs.at(i).S;
         }
       }
+      set_per_batch_cudnn_workspace(end_non_reweight_layer);
 
       // Warm up
       for (int i = 0; i < 1; ++i) {
@@ -908,6 +965,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             best_end_cudnn_layer,
                                             batch_count,
                                             max_norm,
+                                            noise_multiplier,
                                             quant,
                                             false,
                                             false,
@@ -930,6 +988,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             best_end_cudnn_layer,
                                             batch_count,
                                             max_norm,
+                                            noise_multiplier,
                                             quant,
                                             false,
                                             false,
@@ -992,6 +1051,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
         non_reweight_per_example_gradient_size += (size_t)configs.at(i).K*configs.at(i).C*configs.at(i).R*configs.at(i).S;
       }
     }
+    set_per_batch_cudnn_workspace(best_end_non_reweight_layer);
   }
 
   _first_run = false;
@@ -1007,6 +1067,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                     best_end_cudnn_layer,
                                     batch_count,
                                     max_norm,
+                                    noise_multiplier,
                                     quant,
                                     verbose,
                                     profile_time,

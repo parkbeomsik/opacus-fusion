@@ -4,8 +4,8 @@ import subprocess
 
 # Set environment
 CPU_AFFINITY=0-2
-LOG_FILE_NAME="results/a100_result.csv"
-MAX_BATCH_SIZE_FILE_NAME="results/A100_max_batch_size.json"
+LOG_FILE_NAME="results/v100_result.csv"
+MAX_BATCH_SIZE_FILE_NAME="results/V100_max_batch_size.json"
 
 # Batch size configuration
 with open(MAX_BATCH_SIZE_FILE_NAME, "r") as f:
@@ -28,7 +28,7 @@ rnn_experiments = [
 ]
 
 experiments = transformer_experiments + rnn_experiments
-algos = ["naive", "reweight", "elegant", "elegant-quant"]
+algos = ["elegant", "elegant-quant"]
 
 experiments = list(itertools.product(experiments, algos))
 

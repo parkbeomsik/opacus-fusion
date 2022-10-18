@@ -107,8 +107,8 @@ def compute_conv_grad_sample(
     if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
         if layer.weight.requires_grad_opacus:
             # n=batch_sz; o=num_out_channels; p=(num_in_channels/groups)*kernel_sz
-            # grad_sample = PerSampleGrads(contract("noq,npq->nop", backprops, activations, backend="torch"))
-            grad_sample = PerSampleGrads(torch.einsum("noq,npq->nop", backprops, activations))
+            grad_sample = PerSampleGrads(contract("noq,npq->nop", backprops, activations, backend="torch"))
+            # grad_sample = PerSampleGrads(torch.einsum("noq,npq->nop", backprops, activations))
             del activations
             # rearrange the above tensor and extract diagonals.
             grad_sample = PerSampleGrads(grad_sample.view(
@@ -119,8 +119,8 @@ def compute_conv_grad_sample(
                 int(layer.in_channels / layer.groups),
                 np.prod(layer.kernel_size),
             ))
-            # grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
-            grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())
+            grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
+            # grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())
             profiler.record("Backward weight")
 
             shape = [n] + list(layer.weight.shape)

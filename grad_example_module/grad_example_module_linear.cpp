@@ -413,13 +413,16 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate
     if (Linear::non_reweight_per_example_gradient_size > 0) {
-      checkCUBLAS(cublasSaxpy(Linear::cublas_device_handles[0],
-                              (int)Linear::non_reweight_per_example_gradient_size,
-                              (float *)scaling_factors.index({example_idx}).data_ptr(),
-                              (float *)partial_per_example_gradient.data_ptr(),
-                              1,
-                              (float *)per_batch_gradient.data_ptr(),
-                              1));
+      auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)});
+      partial_per_batch_gradient.add_(partial_per_example_gradient, scaling_factors.index({example_idx}).item());
+
+      // checkCUBLAS(cublasSaxpy(Linear::cublas_device_handles[0],
+      //                         (int)Linear::non_reweight_per_example_gradient_size,
+      //                         (float *)scaling_factors.index({example_idx}).data_ptr(),
+      //                         (float *)partial_per_example_gradient.data_ptr(),
+      //                         1,
+      //                         (float *)per_batch_gradient.data_ptr(),
+      //                         1));
     }
 
     TIME_PROFILE(clip_reduce_ms, time_profile);

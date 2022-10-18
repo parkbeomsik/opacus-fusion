@@ -60,13 +60,13 @@ def create_or_accumulate_grad_sample(
         if hasattr(param, "_current_grad_sample"):
             param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
         else:
-            param._current_grad_sample = torch.zeros(
-                torch.Size([max_batch_len]) + grad_sample.shape[1:],
-                device=grad_sample.device,
-                dtype=grad_sample.dtype,
-            )
-            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
-            # param._current_grad_sample = grad_sample
+            # param._current_grad_sample = torch.zeros(
+            #     torch.Size([max_batch_len]) + grad_sample.shape[1:],
+            #     device=grad_sample.device,
+            #     dtype=grad_sample.dtype,
+            # )
+            # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
@@ -416,7 +416,7 @@ class GradSampleModule(AbstractGradSampleModule):
 
         # Keep activations for later example-wise gradient computation
         if config.dpsgd_mode == MODE_ELEGANT:
-            if not isinstance(module, nn.LayerNorm) and not isinstance(module, nn.GroupNorm):
+            if (not isinstance(module, nn.LayerNorm)) and (not isinstance(module, nn.GroupNorm)):
                 if config.quantization and\
                     (isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)):
                     if isinstance(module, DPFASTLSTM):
@@ -440,6 +440,9 @@ class GradSampleModule(AbstractGradSampleModule):
                         module.activations = activations
                     else:
                         module.activations = [activations]
+
+            else:
+                module.activations = []
 
         profiler.record("Backward weight")
 

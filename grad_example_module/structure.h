@@ -144,6 +144,8 @@ struct Conv2dDescriptor {
     cudnnTensorDescriptor_t output_batch_desc;
     cudnnConvolutionBwdFilterAlgo_t bwd_filter_batch_algo_best;
     size_t bwd_filter_batch_algo_best_workspace_size;
+    void * batch_workspace_ptr;
+    torch::Tensor tensor_for_batch_workspace_ptr;
 
     //// cutlass
     CutlassConv2dConfig cutlass_config;

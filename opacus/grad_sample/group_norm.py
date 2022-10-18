@@ -47,7 +47,7 @@ def compute_group_norm_grad_sample(
 
     ret = {}
     if layer.weight.requires_grad_opacus:
-        gs = PerSampleGrads(torch.einsum("ni...->ni", F.group_norm(activations, layer.num_groups, eps=layer.eps) * backprops))
+        gs = PerSampleGrads(contract("ni...->ni", F.group_norm(activations, layer.num_groups, eps=layer.eps) * backprops, backend="torch"))
         # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
             # ret[layer.weight] = PerSampleGrads(contract("ni...->ni", gs, backend="torch"))
         ret[layer.weight] = gs
@@ -62,7 +62,7 @@ def compute_group_norm_grad_sample(
     if layer.bias is not None and layer.bias.requires_grad_opacus:
         # if config.dpsgd_mode == MODE_ELEGANT or config.dpsgd_mode == MODE_NAIVE:
             # ret[layer.bias] = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))
-        ret[layer.bias] = PerSampleGrads(torch.einsum("ni...->ni", backprops))
+        ret[layer.bias] = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))
         profiler.record("Backward weight")
         # if config.dpsgd_mode == MODE_REWEIGHT:
         #     # backprops = PerSampleGrads(contract("ni...->ni", backprops, backend="torch"))

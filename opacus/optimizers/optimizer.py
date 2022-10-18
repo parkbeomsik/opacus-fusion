@@ -427,8 +427,8 @@ class DPOptimizer(Optimizer):
             for p in self.params:
                 _check_processed_flag(p.grad_sample)
                 grad_sample = self._get_flat_grad_sample(p)
-                # grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
-                grad = contract("i,i...", per_sample_clip_factor, grad_sample)
+                grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
+                # grad = contract("i,i...", per_sample_clip_factor, grad_sample, backend="torch")
                 # batch_size = grad_sample.shape[0]
                 # grad = torch.sum(per_sample_clip_factor.view(batch_size, *list(1 for _ in range(1, len(grad_sample.shape)))) * grad_sample, dim=0)
 
@@ -536,6 +536,23 @@ class DPOptimizer(Optimizer):
                             # print(f"{i} {'x'.join(args)}")
                             # i += 1
 
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.conv_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Conv2d):
+                            self.conv_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            self.linear_list.append(layer)
+
+                    self.group_norm_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.GroupNorm):
+                            self.group_norm_list.append(layer)             
+
                     self.first_run = False
 
                 # Collect activations and grad_outputs, precomputed_grads
@@ -546,34 +563,26 @@ class DPOptimizer(Optimizer):
                 linear_norms = []
                 precomputed_grads = []
                 precomputed_norms = []
-                class TTensor(torch.Tensor):
-                    pass
 
-                for name, layer in trainable_modules(self.module):
+                for layer in self.conv_list:
+                    activations.append(layer.activations[0])
+                    grad_outputs.append(layer.grad_outputs[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)   
+                
+                for layer in self.linear_list:
+                    linear_activations.append(layer.activations[0])
+                    linear_grad_outputs.append(layer.grad_outputs[0])
+                    linear_norms.append(layer.weight.grad_sample_norms[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+                
+                for layer in self.group_norm_list:
+                    precomputed_grads.append(layer.weight.grad_sample)
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
 
-                    if isinstance(layer, nn.Conv2d):
-                        activations.append(layer.activations[0])
-                        grad_outputs.append(layer.grad_outputs[0])
-                        if layer.bias is not None:
-                            precomputed_grads.append(layer.bias.grad_sample)
-
-                    if isinstance(layer, nn.Linear):
-                        # precomputed_grads.append(layer.weight.grad_sample_norm)
-                        linear_activations.append(layer.activations[0])
-                        linear_grad_outputs.append(layer.grad_outputs[0])
-                        linear_norms.append(layer.weight.grad_sample_norms[0])
-                        if layer.bias is not None:
-                            precomputed_grads.append(layer.bias.grad_sample)
-                            precomputed_norms.append(layer.bias.grad_sample.norm(2, dim=1))
-
-                    if isinstance(layer, nn.GroupNorm):
-                        precomputed_grads.append(layer.weight.grad_sample)
-                        precomputed_norms.append(layer.weight.grad_sample.norm(2, dim=1))
-                        if layer.bias is not None:
-                            precomputed_grads.append(layer.bias.grad_sample)
-                            precomputed_norms.append(layer.bias.grad_sample.norm(2, dim=1))
-
-                precomputed_norms = [torch.stack(precomputed_norms + linear_norms, dim=1).norm(2, dim=1)]
+                precomputed_norms = [torch.stack(linear_norms, dim=1).norm(2, dim=1)]
                 
                 profiler.record("Clip/reduce")
                 
@@ -582,67 +591,53 @@ class DPOptimizer(Optimizer):
                     grad_example_module.get_clip_and_reduced_grads_conv(self.configs, activations, grad_outputs,
                                                                 precomputed_grads, precomputed_norms,
                                                                 linear_activations, linear_grad_outputs,
-                                                                self.batch_size, self.max_grad_norm, config.quantization, 
+                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier,
+                                                                config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
 
                 torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
+                profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
 
                 per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
 
                 # Set per-batch grads of key GEMM layers
-                idx = 0
-                for name, layer in trainable_modules(self.module):
+                conv_idx = 0
+                linear_idx = 0
+                precomputed_idx = 0
+                
+                for layer in self.conv_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads[conv_idx])
+                    conv_idx += 1
 
-                    if isinstance(layer, nn.Conv2d):
-                        layer.weight.summed_grad = PerBatchGrads(per_batch_grads[idx])
-                        idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
 
-                # Set per-batch grads of pre-computed layers
-                idx = 0
-                for name, layer in trainable_modules(self.module):
+                    layer.activations = []
+                    layer.grad_outputs = []
 
-                    if isinstance(layer, nn.Conv2d):
-                        if layer.bias is not None:
-                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[idx])
-                            idx += 1
+                for layer in self.linear_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_linear_grads[linear_idx])
+                    linear_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
 
-                    if isinstance(layer, nn.Linear):
-                        if layer.bias is not None:
-                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[idx])
-                            idx += 1
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
 
-                    if isinstance(layer, nn.GroupNorm):
-                        layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[idx])
-                        idx += 1
-                        if layer.bias is not None:
-                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[idx])
-                            idx += 1
+                for layer in self.group_norm_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    precomputed_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
 
-                # Set per-batch grads of linear layer (weight)
-                idx = 0
-                for name, layer in trainable_modules(self.module):
-
-                    if isinstance(layer, nn.Linear):
-                        layer.weight.summed_grad = PerBatchGrads(per_batch_linear_grads[idx])
-                        idx += 1
-
-                # Clean activations and grad_outputs
-                for name, layer in trainable_modules(self.module):
-
-                    if isinstance(layer, nn.Conv2d):
-                        layer.activations = []
-                        layer.grad_outputs = []
-
-                    if isinstance(layer, nn.Linear):
-                        layer.activations = []
-                        layer.grad_outputs = []
-                        layer.weight.grad_sample_norms = None
-
-                    if isinstance(layer, nn.GroupNorm):
-                        layer.activations = []
+                    layer.activations = []
 
             if config.model_type == "transformer":
                 if self.first_run:
