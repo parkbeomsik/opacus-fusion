@@ -17,29 +17,29 @@
 
 int main() {
 
-  using cutlass_simt_swgrad_grouped_optimized_128x128x8_128x128x8_1x1x1_5_nhwc = typename cutlass::conv::kernel::DefaultConv2dWgradGrouped<
-      float, 
+  using cutlass_simt_iwgrad_grouped_optimized_256x256x32_128x128x32_1x1x4_3_nhwc = typename cutlass::conv::kernel::DefaultConv2dWgradGrouped<
+      int8_t, 
       cutlass::layout::TensorNHWC,
-      float,
+      int8_t,
       cutlass::layout::TensorNHWC,
       float, cutlass::layout::TensorNHWC,
-      float, 
+      int32_t, 
       cutlass::arch::OpClassSimt, 
       cutlass::arch::Sm80,
-      cutlass::gemm::GemmShape<128, 128, 8>,
-      cutlass::gemm::GemmShape<128, 128, 8>,
-      cutlass::gemm::GemmShape<1, 1, 1>,
+      cutlass::gemm::GemmShape<256, 256, 32>,
+      cutlass::gemm::GemmShape<128, 128, 32>,
+      cutlass::gemm::GemmShape<1, 1, 4>,
       cutlass::epilogue::thread::LinearCombination<
           float, 1,
-          float, float>,
+          int32_t, float>,
       cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle, 
-      5,
+      3,
       cutlass::arch::OpMultiplyAdd,
       cutlass::conv::IteratorAlgorithm::kOptimized
       >::Conv2dWgradKernel;
 
   using test = cutlass::conv::device::ImplicitGemmConvolutionGrouped<
-      cutlass_simt_swgrad_grouped_optimized_128x128x8_128x128x8_1x1x1_5_nhwc>;
+      cutlass_simt_iwgrad_grouped_optimized_256x256x32_128x128x32_1x1x4_3_nhwc>;
 
   return 0;
 

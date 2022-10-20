@@ -45,6 +45,7 @@ def compute_embedding_grad_sample(
         #     layer.grad_outputs_scale = scale
         # else:
         layer.grad_outputs = [GradOutputs(backprops)]
+        layer.activations = [activations]
 
     ret = {}
     if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:

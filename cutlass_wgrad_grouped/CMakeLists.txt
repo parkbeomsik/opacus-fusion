@@ -18,12 +18,13 @@ set(CMAKE_INSTALL_LIBDIR ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_INSTALL_INCLUDEDIR ${CMAKE_BINARY_DIR}/include)
 
 # Find all kernel files in kernel/
-FILE(GLOB KERNELS CONFIGURE_DEPENDS src/kernel/*.cu)
+FILE(GLOB KERNELS CONFIGURE_DEPENDS src/kernel*/*.cu)
 # set(KERNELS src/cutlass_simt_swgrad_grouped_optimized_32x32x4_16x16x4_1x1x1_3_nhwc.cu)
 
 add_library(cutlass_wgrad_grouped STATIC
     ${KERNELS}
     ${PROJECT_SOURCE_DIR}/src/initialize_swgrad_grouped.cpp
+    ${PROJECT_SOURCE_DIR}/src/initialize_iwgrad_grouped.cpp
     ${PROJECT_SOURCE_DIR}/src/cutlass_wgrad_grouped.cu
 )
 

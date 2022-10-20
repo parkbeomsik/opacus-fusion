@@ -31,6 +31,9 @@ from .utils import register_grad_sampler
 
 from opacus.profiler import profiler
 
+from multiprocessing.dummy import Pool as ThreadPool
+
+pool = ThreadPool(4)
 
 @register_grad_sampler([nn.Conv1d, nn.Conv2d, nn.Conv3d])
 def compute_conv_grad_sample(
@@ -55,11 +58,16 @@ def compute_conv_grad_sample(
 
     if config.dpsgd_mode == MODE_ELEGANT:
         if config.quantization:
-            m, scale = batch_quantization_encode(backprops, bit=8)
+            backprops_q, activations_q = batch_quantization_encode([backprops, activations])
+            m, scale = backprops_q
             layer.grad_outputs = [GradOutputs(m)]
             layer.grad_outputs_scale = scale
+            actv_int, actv_scale = activations_q
+            layer.activations = [actv_int]
+            layer.activations_scale = actv_scale
         else:
             layer.grad_outputs = [GradOutputs(backprops)]
+            layer.activations = [activations]
 
     n = activations.shape[0]
     if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
@@ -121,7 +129,7 @@ def compute_conv_grad_sample(
             ))
             grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
             # grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())
-            profiler.record("Backward weight")
+            # profiler.record("Backward weight")
 
             shape = [n] + list(layer.weight.shape)
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
@@ -137,7 +145,7 @@ def compute_conv_grad_sample(
     if layer.bias is not None and layer.bias.requires_grad_opacus:
         # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
         ret[layer.bias] = PerSampleGrads(torch.sum(backprops, dim=2))
-        profiler.record("Backward weight")
+        # profiler.record("Backward weight")
         # if config.dpsgd_mode == MODE_REWEIGHT:
         #     backprops = PerSampleGrads(torch.sum(backprops, dim=2))
         #     profiler.record("Backward weight")
@@ -147,9 +155,9 @@ def compute_conv_grad_sample(
     if config.model_type == "rnn" and config.dpsgd_mode == MODE_NAIVE:
         config.dpsgd_mode = origin_mode
 
-    if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-        del backprops
-        del grad_sample
+    # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+    #     del backprops
+    #     del grad_sample
 
     return ret
 

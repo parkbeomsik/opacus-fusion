@@ -516,6 +516,19 @@ class DPOptimizer(Optimizer):
                     i = 0
                     for name, layer in trainable_modules(self.module):
                         if isinstance(layer, nn.Conv2d):
+                            input_H = layer.activations[0].shape[2]
+                            input_W = layer.activations[0].shape[3]
+                            break
+
+                    print(input_H, input_W)
+
+                    if input_H * input_W < 32*32 + 1:
+                        split_k_size = 1024
+                    else:
+                        split_k_size = 224*224+1 # 112*112 + 1
+
+                    for name, layer in trainable_modules(self.module):
+                        if isinstance(layer, nn.Conv2d):
                             self.batch_size = layer.activations[0].shape[0]
                             N = layer.activations[0].shape[0]
                             H = layer.activations[0].shape[2]
@@ -531,7 +544,7 @@ class DPOptimizer(Optimizer):
                             dilation_h, dilation_w = layer.dilation
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
-                                                                                dilation_h, dilation_w, int(P*Q/1024)+1))
+                                                                                dilation_h, dilation_w, int(P*Q/split_k_size)+1))
                             # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
                             # print(f"{i} {'x'.join(args)}")
                             # i += 1
@@ -595,7 +608,7 @@ class DPOptimizer(Optimizer):
                                                                 config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
 
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
@@ -750,7 +763,7 @@ class DPOptimizer(Optimizer):
                                                                 config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
 
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
@@ -1025,7 +1038,7 @@ class DPOptimizer(Optimizer):
                                                                 self.batch_size, self.max_grad_norm, self.noise_multiplier, config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
 
-                torch.cuda.synchronize()
+                # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())

@@ -7,9 +7,11 @@ def get_string(dtype, op_class, tb_shape, mma_shape, inst_shape, num_stages):
     if dtype == "float":
         element_input = "float"
         element_output = "float"
+        element_compute = "float"
     elif dtype == "int":
         element_input = "int8_t"
-        element_outtput = "int32_t"
+        element_output = "float"
+        element_compute = "int32_t"
 
     string = f"""
 /*
@@ -36,7 +38,7 @@ int main() {{
       {element_input},
       cutlass::layout::TensorNHWC,
       {element_output}, cutlass::layout::TensorNHWC,
-      {element_output}, 
+      {element_compute}, 
       cutlass::arch::{op_class}, 
       cutlass::arch::Sm80,
       cutlass::gemm::GemmShape<{tb_shape[0]}, {tb_shape[1]}, {tb_shape[2]}>,
@@ -44,7 +46,7 @@ int main() {{
       cutlass::gemm::GemmShape<{inst_shape[0]}, {inst_shape[1]}, {inst_shape[2]}>,
       cutlass::epilogue::thread::LinearCombination<
           {element_output}, 1,
-          {element_output}, {element_output}>,
+          {element_compute}, {element_output}>,
       cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle, 
       {num_stages},
       cutlass::arch::OpMultiplyAdd,

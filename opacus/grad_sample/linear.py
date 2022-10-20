@@ -43,12 +43,17 @@ def compute_linear_grad_sample(
     profiler.record("Backward weight")
 
     if config.dpsgd_mode == MODE_ELEGANT:
-        if config.quantization:
-            m, scale = batch_quantization_encode(backprops, bit=8)
+        if config.quantization and (config.model_type == "transformer" or config.model_type == "rnn"):
+            backprops_q, activations_q = batch_quantization_encode([backprops, activations])
+            m, scale = backprops_q
             layer.grad_outputs = [GradOutputs(m)]
             layer.grad_outputs_scale = scale
+            actv_int, actv_scale = activations_q
+            layer.activations = [actv_int]
+            layer.activations_scale = actv_scale
         else:
             layer.grad_outputs = [GradOutputs(backprops)]
+            layer.activations = [activations]
 
     ret = {}
     if layer.weight.requires_grad_opacus:

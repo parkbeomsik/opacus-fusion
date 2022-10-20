@@ -36,6 +36,8 @@ size_t partial_per_example_gradient_size = 0;
 size_t non_reweight_per_example_gradient_size = 0;
 size_t best_end_non_reweight_layer = 3;
 
+int n_streams = 10;
+
 // #define _N_CUDA_STREAMS 100
 cudaStream_t cuda_streams[10];
 cublasHandle_t cublas_handles[10];
@@ -48,13 +50,13 @@ cublasHandle_t cublas_device_handles[10];
 
 void set_descriptors_linear(std::vector<LinearConfig> &configs, bool quant=false, int end_non_reweight_layer=3) {
   // Create custom cuda streams
-  for (int i=0; i < 10; ++i) {
+  for (int i=0; i < Linear::n_streams; ++i) {
     checkCudaErrors(cudaStreamCreate(&Linear::cuda_streams[i]));
     checkCUBLAS(cublasCreate(&Linear::cublas_handles[i]));
     checkCUBLAS(cublasSetStream(Linear::cublas_handles[i], Linear::cuda_streams[i]));
   }
   cublasSetPointerMode(Linear::cublas_handles[9], CUBLAS_POINTER_MODE_DEVICE);
-  for (int i=0; i < 10; ++i) {
+  for (int i=0; i < Linear::n_streams; ++i) {
     checkCUBLAS(cublasCreate(&Linear::cublas_device_handles[i]));
     if (i > 0) {
       checkCUBLAS(cublasSetStream(Linear::cublas_device_handles[i], Linear::cuda_streams[i]));
@@ -194,11 +196,11 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
                                                            (float **)descriptor.C_array, m,
                                                            beta_float,
                                                            num_layers,
-                                                           Linear::cuda_streams[i % 10]
+                                                           Linear::cuda_streams[i % Linear::n_streams]
                                                            ));
     }
     else {
-      checkCUBLAS(cublasGemmBatchedEx(Linear::cublas_handles[i % 10],
+      checkCUBLAS(cublasGemmBatchedEx(Linear::cublas_handles[i % Linear::n_streams],
                                       CUBLAS_OP_T, CUBLAS_OP_T,
                                       m, n, k,
                                       alpha,
@@ -326,7 +328,6 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   }
 
   auto partial_per_example_gradient = torch::empty({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  auto partial_per_example_gradient_int32 = torch::empty({(int64_t)Linear::partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kInt32));
 
   // Put precomputed_norm at last to compute norm of total gradient
   // To compute clip and reduce efficiently, gather all precomputed grads into a single tensor
@@ -353,12 +354,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   int64_t offset = 0;
   for (size_t i = 0; i < Linear::descriptors.size(); ++i) {
     for (size_t layer_idx=0; layer_idx < Linear::descriptors.at(i).config.num_layers; ++layer_idx) {
-      if (quant) {
-        wgrad_ptrs.at(i).push_back(partial_per_example_gradient_int32.index({offset}).data_ptr());
-      }
-      else {
-        wgrad_ptrs.at(i).push_back(partial_per_example_gradient.index({offset}).data_ptr());
-      }
+      wgrad_ptrs.at(i).push_back(partial_per_example_gradient.index({offset}).data_ptr());
+      
       offset += ((Linear::descriptors.at(i).grad_weight_per_example_size));
     }
   }
@@ -379,28 +376,28 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   LOG_STDERR("Compute per-example gradients and scaling factors", verbose);
 
   // Create cuda events
-  std::vector<cudaEvent_t> events(Linear::descriptors.size());
-  for (size_t i=0; i < Linear::descriptors.size(); ++i) {
-    checkCudaErrors(cudaEventCreate(&events[i%10]));
+  std::vector<cudaEvent_t> events(Linear::n_streams);
+  for (size_t i=0; i < Linear::n_streams; ++i) {
+    checkCudaErrors(cudaEventCreate(&events[i]));
   }
   // Compute per-example gradients and scaling factors
   for (int example_idx = 0; example_idx < batch_count; ++example_idx) {
     checkCudaErrors(cudaEventRecord(events[0], NULL));
-    for (size_t i=0; i < Linear::descriptors.size(); ++i) {
-      checkCudaErrors(cudaStreamWaitEvent(Linear::cuda_streams[i%10], events[0], 0));
+    for (size_t i=0; i < Linear::n_streams; ++i) {
+      checkCudaErrors(cudaStreamWaitEvent(Linear::cuda_streams[i], events[0], 0));
     }
 
     partial_per_example_gradient.index_put_({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size}, precomputed_per_example_norms.index({example_idx}));
     // Compute wgrad of front layers using CUBLAS
     compute_single_per_example_gradient_embedding(partial_per_example_gradient, embedding_actvs, embedding_ograds, embedding_vocab_sizes, example_idx);
-    compute_single_per_example_gradient_cublas(partial_per_example_gradient, partial_per_example_gradient_int32, actvs, ograds, example_idx, quant);
+    compute_single_per_example_gradient_cublas(partial_per_example_gradient, partial_per_example_gradient, actvs, ograds, example_idx, quant);
 
     // Wait all streams to finish
-    for (size_t i=0; i < Linear::descriptors.size(); ++i) {
-      checkCudaErrors(cudaEventRecord(events[i%10], Linear::cuda_streams[i%10]));
+    for (size_t i=0; i < Linear::n_streams; ++i) {
+      checkCudaErrors(cudaEventRecord(events[i], Linear::cuda_streams[i]));
     }
-    for (size_t i=0; i < Linear::descriptors.size(); ++i) {
-      checkCudaErrors(cudaStreamWaitEvent(NULL, events[i%10], 0));
+    for (size_t i=0; i < Linear::n_streams; ++i) {
+      checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
     }
 
     TIME_PROFILE(backward_weight_ms, time_profile);
@@ -414,7 +411,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     // Clip and accumulate
     if (Linear::non_reweight_per_example_gradient_size > 0) {
       auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)});
-      partial_per_batch_gradient.add_(partial_per_example_gradient, scaling_factors.index({example_idx}).item());
+      partial_per_batch_gradient.add_(partial_per_example_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
 
       // checkCUBLAS(cublasSaxpy(Linear::cublas_device_handles[0],
       //                         (int)Linear::non_reweight_per_example_gradient_size,
@@ -494,7 +491,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       //   partial_ograds = partial_ograds.to(torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kFloat32));
       // }
       
-      at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromPool());
+      at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromExternal(Linear::cuda_streams[layer_idx%Linear::n_streams], 0));
 
       torch::Tensor temp_ograds = torch::empty({0});
       torch::Tensor temp_actvs = torch::empty({0});
@@ -519,6 +516,13 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
                           actvs.at(i).at(layer_idx).reshape({actvs.at(i).at(layer_idx).sizes()[0]*actvs.at(i).at(layer_idx).sizes()[1], actvs.at(i).at(layer_idx).sizes()[2]}));
       }
     }
+  }
+  // Wait all streams to finish
+  for (size_t i=0; i < Linear::n_streams; ++i) {
+    checkCudaErrors(cudaEventRecord(events[i], Linear::cuda_streams[i]));
+  }
+  for (size_t i=0; i < Linear::n_streams; ++i) {
+    checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
   }
   at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
   TIME_PROFILE(clip_reduce_ms, time_profile);

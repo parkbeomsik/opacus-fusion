@@ -125,9 +125,11 @@ extern void ** device_ptr_B;
 extern void ** device_ptr_C;
 extern void ** device_ptr_D;
 
-void initialize();
+void initialize_int();
+void initialize_float();
 
 // size_t get_device_problem_size_in_bytes (int problem_count);
+template<typename dType>
 void initialize_problems(std::vector<Conv2dConfig> const &);
 
 OperationWithWorkspace get_best_operation(void ** ptr_A,

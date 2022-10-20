@@ -37,6 +37,8 @@
 
 #include "cutlass_wgrad_grouped.h"
 
+#include "cutlass/cutlass.h"
+
 #define FatalError(s) {                                                \
     std::stringstream _where, _message;                                \
     _where << __FILE__ << ':' << __LINE__;                             \
@@ -77,6 +79,15 @@
     if (status != cutlass_wgrad_grouped::Status::kSuccess) {            \
       _error << "Cutlass failure: "                                    \
       << "(" << cutlass_wgrad_grouped::cutlassGetStatusString(status) << ")";  \
+      FatalError(_error.str());                                        \
+    }                                                                   \
+}
+
+#define checkCutlassRaw(status) {                                      \
+    std::stringstream _error;                                          \
+    if (status != cutlass::Status::kSuccess) {            \
+      _error << "Cutlass failure: "                                    \
+      << "(" << cutlass::cutlassGetStatusString(status) << ")";  \
       FatalError(_error.str());                                        \
     }                                                                   \
 }

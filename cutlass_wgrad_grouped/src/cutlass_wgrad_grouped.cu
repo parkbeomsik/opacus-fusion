@@ -30,12 +30,17 @@ void ** device_ptr_D;
 
 int problem_count;
 
+void initialize_int() {
 
-void initialize() {
+    initialize_iwgrad_grouped(operations);
+}
+
+void initialize_float() {
 
     initialize_swgrad_grouped(operations);
 }
 
+template<typename dType>
 void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
 
     using namespace cutlass::conv;
@@ -74,20 +79,21 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
                                cudaMemcpyHostToDevice));
 
     // Set problems of operations
-    using TensorRefAll = cutlass::TensorRef<float, cutlass::layout::TensorNHWC>;
-    std::vector<TensorRefAll> host_ref_A;
-    std::vector<TensorRefAll> host_ref_B;
-    std::vector<TensorRefAll> host_ref_C;
-    std::vector<TensorRefAll> host_ref_D;
+    using TensorRefIn = cutlass::TensorRef<dType, cutlass::layout::TensorNHWC>;
+    using TensorRefOut = cutlass::TensorRef<float, cutlass::layout::TensorNHWC>;
+    std::vector<TensorRefIn> host_ref_A;
+    std::vector<TensorRefIn> host_ref_B;
+    std::vector<TensorRefOut> host_ref_C;
+    std::vector<TensorRefOut> host_ref_D;
 
-    TensorRefAll *device_ref_A;
-    TensorRefAll *device_ref_B;
-    TensorRefAll *device_ref_C;
-    TensorRefAll *device_ref_D;
-    checkCudaErrors(cudaMalloc(&device_ref_A, sizeof(TensorRefAll)*problem_count));
-    checkCudaErrors(cudaMalloc(&device_ref_B, sizeof(TensorRefAll)*problem_count));
-    checkCudaErrors(cudaMalloc(&device_ref_C, sizeof(TensorRefAll)*problem_count));
-    checkCudaErrors(cudaMalloc(&device_ref_D, sizeof(TensorRefAll)*problem_count));
+    TensorRefIn *device_ref_A;
+    TensorRefIn *device_ref_B;
+    TensorRefOut *device_ref_C;
+    TensorRefOut *device_ref_D;
+    checkCudaErrors(cudaMalloc(&device_ref_A, sizeof(TensorRefIn)*problem_count));
+    checkCudaErrors(cudaMalloc(&device_ref_B, sizeof(TensorRefIn)*problem_count));
+    checkCudaErrors(cudaMalloc(&device_ref_C, sizeof(TensorRefOut)*problem_count));
+    checkCudaErrors(cudaMalloc(&device_ref_D, sizeof(TensorRefOut)*problem_count));
     for (auto device_workspace : device_workspaces){
         checkCudaErrors(cudaFree(device_workspace));
     }
@@ -109,10 +115,16 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
         operations_with_workspaces.push_back(OperationWithWorkspace({operation, host_workspace}));
     }
 
-    size_t workspace_size = operations_with_workspaces.at(0).operation->get_workspace_size(&wgrad_config, operations_with_workspaces.at(0).host_workspace);
-
+    size_t max_workspace_size = 0;
+    for (auto& operation_with_workspace : operations_with_workspaces) {
+        size_t workspace_size = operation_with_workspace.operation->get_workspace_size(&wgrad_config, operation_with_workspace.host_workspace);
+        if (workspace_size > max_workspace_size) {
+            max_workspace_size = workspace_size;
+        }
+    }
+    
     void * device_semaphore;
-    checkCudaErrors(cudaMalloc(&device_semaphore, workspace_size));
+    checkCudaErrors(cudaMalloc(&device_semaphore, max_workspace_size));
     device_workspaces.push_back(device_semaphore);
 
     for (auto operation_with_workspace : operations_with_workspaces) {
@@ -121,6 +133,9 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
 
     assert(operations_with_workspaces.size() == operations.size());
 }
+
+template void initialize_problems<int8_t>(std::vector<Conv2dConfig> const &);
+template void initialize_problems<float>(std::vector<Conv2dConfig> const &);
 
 void finalize() {
     for (auto device_workspace : device_workspaces){
@@ -148,6 +163,7 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
 
     std::vector<float> runtime_ms_list(operations.size(), 100000.0);
     // runtime_ms_list.resize(operations.size());
+    std::cout << "Get best operation..." << std::endl;
 
     for (int i = 0; i < operations.size(); ++i) {
         auto operation = operations.at(i);
@@ -203,12 +219,13 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
 
         if (result == Status::kSuccess) {
             // If CUTLASS is so slow for this problem, it stops early.
-            // printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
+            printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
             if (runtime_ms > 3000.0) {
                 break;
             }
             runtime_ms_list.at(i) = runtime_ms;
         } else {
+            printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
             // Means it failed
             runtime_ms_list.at(i) = 100000.0;
         }

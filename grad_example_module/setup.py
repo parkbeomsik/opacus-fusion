@@ -10,7 +10,8 @@ setup(
             'compute_scaling_factor_cuda.cu',
             'grad_example_module.cpp',
             'quantize.cu',
-            'cutlass_simt_int8_batched_gemm.cu'
+            'cutlass_simt_int8_batched_gemm.cu',
+            'cutlass_simt_int8_wgrad.cu'
         ], 
         libraries=["cudnn", "cutlass_wgrad_grouped",],
         include_dirs=["/home/beomsik/cuda-11.0/include",
@@ -18,8 +19,8 @@ setup(
                       "/home/beomsik/dp/cutlass/include"
                       ],
         library_dirs=["./", "/home/beomsik/dp/opacus-fusion/cutlass_wgrad_grouped/build/lib"],
-        extra_compile_args={'cxx': ["-O3", "-g"], # -g
-                            'nvcc': ["-O3"]},
+        extra_compile_args={'cxx': [], # -g
+                            'nvcc': []},
         )
     ],
     cmdclass={

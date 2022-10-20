@@ -73,7 +73,7 @@ def stochastic_rounding(x: torch.Tensor):
 encode_stream = torch.cuda.Stream()
 
 def batch_quantization_encode(m, bit=8):
-    torch.cuda.set_stream(encode_stream)
+    # torch.cuda.set_stream(encode_stream)
     # max_int = 2**(bit-1)
     # m_shape = m.shape
     # m = m.reshape(m.shape[0], -1)
@@ -86,7 +86,7 @@ def batch_quantization_encode(m, bit=8):
     # m = m.to(torch.float32)
     # m = m.reshape(m_shape)
     m, max_m = quantize_int8(m)
-    torch.cuda.set_stream(torch.cuda.default_stream())
+    # torch.cuda.set_stream(torch.cuda.default_stream())
     return m, max_m #.values
 
 def batch_quantization_decode(m, max_m, bit=8):

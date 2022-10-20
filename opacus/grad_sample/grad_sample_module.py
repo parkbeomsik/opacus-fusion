@@ -417,29 +417,30 @@ class GradSampleModule(AbstractGradSampleModule):
         # Keep activations for later example-wise gradient computation
         if config.dpsgd_mode == MODE_ELEGANT:
             if (not isinstance(module, nn.LayerNorm)) and (not isinstance(module, nn.GroupNorm)):
-                if config.quantization and\
-                    (isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)):
-                    if isinstance(module, DPFASTLSTM):
-                        if module.bidirectional:
-                            m1, scale1 = batch_quantization_encode(activations[0], bit=8)
-                            m2, scale2 = batch_quantization_encode(activations[1], bit=8)
-                            m3, scale3 = batch_quantization_encode(activations[2], bit=8)
-                            module.activations = [m1, m2, m3]
-                            module.activations_scale = [scale1, scale2, scale3]
-                        else:
-                            m1, scale1 = batch_quantization_encode(activations[0], bit=8)
-                            m2, scale2 = batch_quantization_encode(activations[1], bit=8)
-                            module.activations = [m1, m2]
-                            module.activations_scale = [scale1, scale2]
-                    else:
-                        m, scale = batch_quantization_encode(activations, bit=8)
-                        module.activations = [m]
-                        module.activations_scale = scale
-                else:
-                    if isinstance(module, DPFASTLSTM):
-                        module.activations = activations
-                    else:
-                        module.activations = [activations]
+                pass
+                # if config.quantization and\
+                #     (((isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)) and (config.model_type == "transformer" or config.model_type == "rnn"))):
+                #     if isinstance(module, DPFASTLSTM):
+                #         if module.bidirectional:
+                #             m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                #             m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                #             m3, scale3 = batch_quantization_encode(activations[2], bit=8)
+                #             module.activations = [m1, m2, m3]
+                #             module.activations_scale = [scale1, scale2, scale3]
+                #         else:
+                #             m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                #             m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                #             module.activations = [m1, m2]
+                #             module.activations_scale = [scale1, scale2]
+                #     else:
+                #         m, scale = batch_quantization_encode(activations, bit=8)
+                #         module.activations = [m]
+                #         module.activations_scale = scale
+                # elif not isinstance(module, nn.Conv2d):
+                #     if isinstance(module, DPFASTLSTM):
+                #         module.activations = activations
+                #     else:
+                #         module.activations = [activations]
 
             else:
                 module.activations = []

@@ -412,13 +412,13 @@ def main():  # noqa: C901
                     row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
 
-    if not config.profile_time and not config.profile_memory:
-        print("")
-        print("==============================================================================================")
-        print("")
-        print("                                     Throughput (#examples/s)")
-        print("")
-        print((args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))))
+    # if not config.profile_time and not config.profile_memory:
+    print("")
+    print("==============================================================================================")
+    print("")
+    print("                                     Throughput (#examples/s)")
+    print("")
+    print((args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))))
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Opacus Imagenet Benchmark")
