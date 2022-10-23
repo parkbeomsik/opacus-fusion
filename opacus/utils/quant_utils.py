@@ -85,9 +85,9 @@ def batch_quantization_encode(m, bit=8):
     # m = m.to(torch.int8)
     # m = m.to(torch.float32)
     # m = m.reshape(m_shape)
-    m, max_m = quantize_int8(m)
+    q_list = quantize_int8(m)
     # torch.cuda.set_stream(torch.cuda.default_stream())
-    return m, max_m #.values
+    return q_list #.values
 
 def batch_quantization_decode(m, max_m, bit=8):
     max_int = 2**(bit-1)

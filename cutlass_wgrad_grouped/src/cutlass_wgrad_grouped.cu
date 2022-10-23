@@ -219,13 +219,13 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
 
         if (result == Status::kSuccess) {
             // If CUTLASS is so slow for this problem, it stops early.
-            printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
+            // printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
             if (runtime_ms > 3000.0) {
                 break;
             }
             runtime_ms_list.at(i) = runtime_ms;
         } else {
-            printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
+            // printf("runtime_ms = %f\t%s\n", runtime_ms, operation->name.c_str());
             // Means it failed
             runtime_ms_list.at(i) = 100000.0;
         }

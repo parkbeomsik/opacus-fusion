@@ -1,5 +1,8 @@
 import subprocess
 import itertools
+import os
+
+from tqdm import tqdm
 
 def get_source_code(m, n, k, batch_count, tb_shape, mma_shape, inst_shape):
   return f'''
@@ -68,11 +71,11 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   return cudaSuccess;
 }}
 
-int main(void) {{
-  int m = {m};
-  int n = {n};
-  int k = {k};
-  int batch_count = {batch_count};
+int main(int argc, char * argv[]) {{
+  int m = atoi(argv[1]);
+  int n = atoi(argv[2]);
+  int k = atoi(argv[3]);
+  int batch_count = atoi(argv[4]);
 
   std::vector<void *> host_A_array(batch_count, NULL);
   std::vector<void *> host_B_array(batch_count, NULL);
@@ -161,47 +164,72 @@ def main():
   # inst_shape_1_cand = [1]
   # inst_shape_2_cand = [4]
 
-  m = 768
-  n = 768
-  k = 256
-  batch_count = 48
+  # problem = [m, n, k, batch_count]
+  problems = [
+              # [768, 768, 32, 48],
+              # [3072, 768, 32, 12],
+              # [768, 3072, 32, 12],
+              [768, 768, 256, 48],
+              [3072, 768, 256, 12],
+              [768, 3072, 256, 12],
+              [1024, 1024, 32, 96],
+              [4096, 1024, 32, 24],
+              [1024, 4096, 32, 24],
+              [1024, 1024, 256, 96],
+              [4096, 1024, 256, 24],
+              [1024, 4096, 256, 24],
+              ]
 
-  all_cases = itertools.product(tb_shape_0_cand, tb_shape_1_cand, tb_shape_2_cand,
-                                mma_shape_0_cand, mma_shape_1_cand, mma_shape_2_cand,
-                                inst_shape_0_cand, inst_shape_1_cand, inst_shape_2_cand)
-
-  min_runtime = 1000.0
-  min_conf = None
-
-  for conf in all_cases:
-    tb_shape = [conf[0], conf[1], conf[2]]
-    mma_shape = [conf[3], conf[4], conf[5]]
-    inst_shape = [conf[6], conf[7], conf[8]]
-
-    if mma_shape[0] > tb_shape[0] or mma_shape[1] > tb_shape[1] or mma_shape[2] > tb_shape[2]:
-      continue
+  for problem in problems:
+    m = problem[0]
+    n = problem[1]
+    k = problem[2]
+    batch_count = problem[3]
     
-    with open("test_main.cu", "w") as f:
-      f.write(get_source_code(m, n, k, batch_count, tb_shape, mma_shape, inst_shape))
 
-    compile_ret = subprocess.run("nvcc -I/home/beomsik/dp/cutlass/include test_main.cu -o test", shell=True, capture_output=True)
-    if compile_ret.returncode != 0:
-      print(f"{tb_shape}, {mma_shape}, {inst_shape} : error")
-      continue
+    all_cases = itertools.product(tb_shape_0_cand, tb_shape_1_cand, tb_shape_2_cand,
+                                  mma_shape_0_cand, mma_shape_1_cand, mma_shape_2_cand,
+                                  inst_shape_0_cand, inst_shape_1_cand, inst_shape_2_cand)
+    num_cases = len(tb_shape_0_cand) * len(tb_shape_1_cand) * len(tb_shape_2_cand) *\
+                len(mma_shape_0_cand) * len(mma_shape_1_cand) * len(mma_shape_2_cand) *\
+                len(inst_shape_0_cand) * len(inst_shape_1_cand) * len(inst_shape_2_cand)
 
-    ret = subprocess.run("./test", shell=True, capture_output=True)
+    min_runtime = 1000.0
+    min_conf = None
 
-    print(f"{tb_shape}, {mma_shape}, {inst_shape} : {ret.stdout.decode()[:-1]} ms")
-    try:
-      if float(ret.stdout.decode()[:-1]) < min_runtime:
-        min_runtime = float(ret.stdout.decode()[:-1])
-        min_conf = conf
-    except:
-      pass
+    for conf in tqdm(all_cases, total=num_cases):
+      tb_shape = [conf[0], conf[1], conf[2]]
+      mma_shape = [conf[3], conf[4], conf[5]]
+      inst_shape = [conf[6], conf[7], conf[8]]
 
-  print(min_conf)
-  print(min_runtime)
-  print(f"{batch_count}x{m}x{n}x{k} : <{min_conf[0]}, {min_conf[1]}, {min_conf[2]}>, <{min_conf[3]}, {min_conf[4]}, {min_conf[5]}>, <{min_conf[6]}, {min_conf[7]}, {min_conf[8]}>, {min_runtime} ms")
+      if mma_shape[0] > tb_shape[0] or mma_shape[1] > tb_shape[1] or mma_shape[2] > tb_shape[2]:
+        continue
+      
+      exec_name = f'int8_batched_gemm_kernels/simt_igemm_batched_{tb_shape[0]}x{tb_shape[1]}x{tb_shape[2]}_{mma_shape[0]}x{mma_shape[1]}x{mma_shape[2]}_{inst_shape[0]}x{inst_shape[1]}x{inst_shape[2]}_test'
+
+      if not os.path.isfile(exec_name):
+        continue
+        with open("test_main.cu", "w") as f:
+          f.write(get_source_code(m, n, k, batch_count, tb_shape, mma_shape, inst_shape))
+
+        compile_ret = subprocess.run(f"nvcc -I/home/beomsik/dp/cutlass/include test_main.cu -o {exec_name}", shell=True, capture_output=True)
+        if compile_ret.returncode != 0:
+          # print(f"{tb_shape}, {mma_shape}, {inst_shape} : error")
+          continue
+
+      ret = subprocess.run(f"{exec_name} {' '.join(map(lambda x: str(x), problem))}", shell=True, capture_output=True)
+
+      print(f"{tb_shape}, {mma_shape}, {inst_shape} : {ret.stdout.decode()[:-1]} ms")
+      try:
+        if float(ret.stdout.decode()[:-1]) < min_runtime:
+          min_runtime = float(ret.stdout.decode()[:-1])
+          min_conf = conf
+      except:
+        pass
+
+    # print(min_conf)
+    # print(min_runtime)
+    print(f"{problem[3]}x{problem[0]}x{problem[1]}x{problem[2]} : <{min_conf[0]}, {min_conf[1]}, {min_conf[2]}>, <{min_conf[3]}, {min_conf[4]}, {min_conf[5]}>, <{min_conf[6]}, {min_conf[7]}, {min_conf[8]}>, {min_runtime} ms")
 
 
 if __name__ == "__main__":

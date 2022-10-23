@@ -34,8 +34,8 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
     int32_t,
     cutlass::arch::OpClassSimt,
     cutlass::arch::Sm75,
-    cutlass::gemm::GemmShape<256, 256, 64>,
-    cutlass::gemm::GemmShape<256, 256, 64>,
+    cutlass::gemm::GemmShape<128, 128, 128>,
+    cutlass::gemm::GemmShape<128, 64, 4>,
     cutlass::gemm::GemmShape<1, 1, 4>,
     cutlass::epilogue::thread::LinearCombination<
       float, 
@@ -64,11 +64,11 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   return cudaSuccess;
 }
 
-int main(void) {
-  int m = 768;
-  int n = 768;
-  int k = 256;
-  int batch_count = 48;
+int main(int argc, char * argv[]) {
+  int m = atoi(argv[1]);
+  int n = atoi(argv[2]);
+  int k = atoi(argv[3]);
+  int batch_count = atoi(argv[4]);
 
   std::vector<void *> host_A_array(batch_count, NULL);
   std::vector<void *> host_B_array(batch_count, NULL);

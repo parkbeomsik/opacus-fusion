@@ -22,7 +22,6 @@ cudaError_t cutlass_simt_iwgrad(
   int stride_w,
   int dilation_h,
   int dilation_w,
-  int split_k_slices = 4,
   float alpha = 1.0,
   float beta = 0.0,
   cudaStream_t stream = NULL);
@@ -42,5 +41,4 @@ size_t cutlass_simt_iwgrad_get_workspace(
   int stride_h,
   int stride_w,
   int dilation_h,
-  int dilation_w,
-  int split_k_slices);
+  int dilation_w);

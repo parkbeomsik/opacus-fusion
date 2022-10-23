@@ -54,3 +54,12 @@
       FatalError(_error.str());                                        \
     }                                                                   \
 }
+
+#define checkCutlassRaw(status) {                                      \
+    std::stringstream _error;                                          \
+    if (status != cutlass::Status::kSuccess) {            \
+      _error << "Cutlass failure: "                                    \
+      << "(" << cutlass::cutlassGetStatusString(status) << ")";  \
+      FatalError(_error.str());                                        \
+    }                                                                   \
+}

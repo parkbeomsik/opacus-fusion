@@ -70,7 +70,7 @@ std::vector<void *> host_ptr_D;
 
 cutlass_wgrad_grouped::OperationWithWorkspace best_operation_with_workspace;
 
-int num_rows_to_compute = 1;
+int num_rows_to_compute = 4;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -92,6 +92,16 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
   cudnnDataType_t dtype = CUDNN_DATA_FLOAT;
 
   size_t total_ws_size = 0;
+
+  if ((configs.at(0).H <= 32) && configs.size() <= 40) {
+    num_rows_to_compute = 16;
+  }
+  else if((configs.at(0).H <= 32) && configs.size() <= 70) {
+    num_rows_to_compute = 4;
+  } 
+  else { 
+    num_rows_to_compute = 1;
+  }
   
   for (size_t i=0; i < configs.size(); ++i) {
     auto config = &configs.at(i);
@@ -218,8 +228,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
                                         config->stride_h,
                                         config->stride_w,
                                         config->dilation_h,
-                                        config->dilation_w,
-                                        4);
+                                        config->dilation_w);
     }
 
     //// CUTLASS
@@ -439,14 +448,10 @@ void set_cutlass_best_operation(size_t end_cudnn_layer,
   }
 
   auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-
   // Set CUTLASS device pointers
   std::vector<void *> wgrads_ptrs;
-  int64_t offset = 0;
-  
   for (int row = 0; row < num_rows_to_compute; ++row) {
     float * wgrads_ptr = (float *)partial_per_example_gradient.index({row}).data_ptr();
-    // float * wgrads_ptr_init = (float *)partial_per_example_gradient.index({row}).data_ptr();
     for (size_t i = 0; i < descriptors.size(); ++i) {
       wgrads_ptrs.push_back(wgrads_ptr);
       wgrads_ptr += descriptors.at(i).grad_weight_per_example_size;
@@ -511,7 +516,6 @@ void compute_single_per_example_gradient_cudnn(std::vector<Conv2dDescriptor>& de
                                             desc.config.stride_w,
                                             desc.config.dilation_h,
                                             desc.config.dilation_w,
-                                            4,
                                             1.0,
                                             0.0,
                                             cuda_streams[i % _N_CUDA_STREAMS]));
@@ -653,6 +657,16 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float norm_ms = 0.0;
   float clip_reduce_ms = 0.0;
   float add_noise_ms = 0.0;
+
+  // convert to nchw -> nhwc
+  for (size_t i = 0; i < actvs.size(); ++i) {
+    if (i >= end_cudnn_layer) {
+      c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+      actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+    }
+  }
+  c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
 
   auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   

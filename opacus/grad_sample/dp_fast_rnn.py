@@ -51,9 +51,9 @@ def compute_rnn_grad_sample(
                 layer.activations = [a0[0], a1[0], a2[0]]
                 layer.activations_scale = [a0[1], a1[1], a1[1]]
             else:
-                b0, b1, a0, a1 = batch_quantization_encode(backprops + activations)
-                layer.grad_outputs = [GradOutputs(b0[0]), GradOutputs(b1[0])]
-                layer.grad_outputs_scale = [b0[1], b1[1]]
+                b0, a0, a1 = batch_quantization_encode(backprops + activations)
+                layer.grad_outputs = [GradOutputs(b0[0])]
+                layer.grad_outputs_scale = [b0[1]]
                 layer.activations = [a0[0], a1[0]]
                 layer.activations_scale = [a0[1], a1[1]]
         else:
