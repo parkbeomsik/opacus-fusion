@@ -201,12 +201,12 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
     }
     else {
       checkCUBLAS(cublasGemmBatchedEx(Linear::cublas_handles[i % Linear::n_streams],
-                                      CUBLAS_OP_T, CUBLAS_OP_T,
+                                      CUBLAS_OP_N, CUBLAS_OP_T,
                                       m, n, k,
                                       alpha,
                                       descriptor.A_array + example_idx*num_layers,
                                       CUDA_R_32F,
-                                      k,
+                                      m,
                                       descriptor.B_array + example_idx*num_layers,
                                       CUDA_R_32F,
                                       n,
@@ -242,7 +242,8 @@ void compute_single_per_example_gradient_embedding(torch::Tensor embedding_gradi
         auto ograd = embedding_ograds.at(i).index({example_idx});
         auto index = actv.unsqueeze(-1).expand({actv.sizes()[0], ograd.sizes()[1]}).reshape({-1, ograd.sizes()[1]});
 
-        embedding_gradient.zero_();
+        // embedding_gradient.zero_();
+        cudaMemsetAsync(embedding_gradient.data_ptr(), 0, embedding_gradient_size);
         // embedding_gradient.index_put_({Slice()}, torch::zeros({embedding_vocab_sizes.at(i), ograd.sizes()[1]}, torch::TensorOptions().device(torch::kCUDA, 0)));
 
         embedding_gradient.scatter_add_(0, index, ograd.reshape({actv.sizes()[0], ograd.sizes()[1]}));
@@ -373,6 +374,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   // Workspace to store scaling factors
   auto scaling_factors = torch::empty({batch_count}, torch::TensorOptions().device(torch::kCUDA, 0));
 
+  TIME_PROFILE(clip_reduce_ms, time_profile);
+
   LOG_STDERR("Compute per-example gradients and scaling factors", verbose);
 
   // Create cuda events
@@ -382,21 +385,25 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   }
   // Compute per-example gradients and scaling factors
   for (int example_idx = 0; example_idx < batch_count; ++example_idx) {
+    // partial_per_example_gradient.index_put_({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size}, precomputed_per_example_norms.index({example_idx}));
+    cudaMemcpyAsync((void *)((float *)partial_per_example_gradient.data_ptr() + Linear::partial_per_example_gradient_size + embedding_gradient_size),
+                    (void *)((float *)precomputed_per_example_norms.data_ptr() + example_idx),
+                    4, cudaMemcpyDeviceToDevice);
+    // Compute wgrad of front layers using CUBLAS
+    compute_single_per_example_gradient_embedding(partial_per_example_gradient, embedding_actvs, embedding_ograds, embedding_vocab_sizes, example_idx);
+
     checkCudaErrors(cudaEventRecord(events[0], NULL));
-    for (size_t i=0; i < Linear::n_streams; ++i) {
+    for (size_t i=0; i < configs.size(); ++i) {
       checkCudaErrors(cudaStreamWaitEvent(Linear::cuda_streams[i], events[0], 0));
     }
 
-    partial_per_example_gradient.index_put_({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size}, precomputed_per_example_norms.index({example_idx}));
-    // Compute wgrad of front layers using CUBLAS
-    compute_single_per_example_gradient_embedding(partial_per_example_gradient, embedding_actvs, embedding_ograds, embedding_vocab_sizes, example_idx);
     compute_single_per_example_gradient_cublas(partial_per_example_gradient, partial_per_example_gradient, actvs, ograds, example_idx, quant);
 
     // Wait all streams to finish
-    for (size_t i=0; i < Linear::n_streams; ++i) {
+    for (size_t i=0; i < configs.size(); ++i) {
       checkCudaErrors(cudaEventRecord(events[i], Linear::cuda_streams[i]));
     }
-    for (size_t i=0; i < Linear::n_streams; ++i) {
+    for (size_t i=0; i < configs.size(); ++i) {
       checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
     }
 

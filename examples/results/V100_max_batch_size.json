@@ -16,7 +16,7 @@
     "rnn gnmt 32": 16,
     "rnn gnmt 64": 16,
     "rnn gnmt 128": 16,
-    "rnn gnmt 256": 16,
+    "rnn gnmt 256": 8,
     "rnn deepspeech 32": 16,
     "rnn deepspeech 64": 16,
     "rnn deepspeech 128": 16,

@@ -60,11 +60,11 @@ def create_or_accumulate_grad_sample(
         if hasattr(param, "_current_grad_sample"):
             param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
         else:
-            # param._current_grad_sample = torch.zeros(
-            #     torch.Size([max_batch_len]) + grad_sample.shape[1:],
-            #     device=grad_sample.device,
-            #     dtype=grad_sample.dtype,
-            # )
+            param._current_grad_sample = torch.zeros(
+                torch.Size([max_batch_len]) + grad_sample.shape[1:],
+                device=grad_sample.device,
+                dtype=grad_sample.dtype,
+            )
             # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
             param._current_grad_sample = grad_sample
 

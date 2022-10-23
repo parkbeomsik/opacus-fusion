@@ -27,8 +27,8 @@ rnn_experiments = [
     ("rnn", "deepspeech", "32"), ("rnn", "deepspeech", "64"), ("rnn", "deepspeech", "128"), ("rnn", "deepspeech", "256"), ("rnn", "deepspeech", "512"),
 ]
 
-experiments = cnn_experiments + transformer_experiments + rnn_experiments
-algos = ["elegant-quant"]
+experiments = rnn_experiments
+algos = ["naive", "reweight", "elegant"]
 
 experiments = list(itertools.product(experiments, algos))
 

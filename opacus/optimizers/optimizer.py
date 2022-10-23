@@ -762,6 +762,8 @@ class DPOptimizer(Optimizer):
                                                                 self.batch_size, self.max_grad_norm, self.noise_multiplier,
                                                                 config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
+                # print(f"Start Python {time.time_ns()}")
+                start = time.time()
 
                 # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
@@ -831,6 +833,8 @@ class DPOptimizer(Optimizer):
                     layer.activations = []
                     layer.grad_outputs = []
                     layer.weight.grad_sample_norms = None
+
+                print(f"{(time.time() - start) * 1000}")
 
             if config.model_type == "rnn":
                 if self.first_run:
@@ -1179,8 +1183,10 @@ class DPOptimizer(Optimizer):
                     secure_mode=self.secure_mode,
                 )
                 p.grad = (p.summed_grad + noise).view_as(p)
+            else:
+                p.grad = p.summed_grad.view_as(p)
 
-                _mark_as_processed(p.summed_grad)
+            _mark_as_processed(p.summed_grad)
 
             p.summed_grad = None
 

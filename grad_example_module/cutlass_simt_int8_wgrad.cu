@@ -128,8 +128,8 @@ public:
       split_k_mode
     };
 
-    checkCutlassRaw(implicit_gemm.initialize(arguments, workspace));
-    checkCutlassRaw(implicit_gemm(stream));
+    // checkCutlassRaw(implicit_gemm.initialize(arguments, workspace, stream));
+    checkCutlassRaw(implicit_gemm(arguments, workspace, stream));
 
     // Do reduction
     static cutlass::conv::Operator const kConvolutionalOperator = ImplicitGemm::kConvolutionalOperator;
@@ -155,8 +155,8 @@ public:
         {alpha, beta}
     );
 
-    checkCutlassRaw(reduction_op.initialize(reduction_args, nullptr));
-    checkCutlassRaw(reduction_op());
+    // checkCutlassRaw(reduction_op.initialize(reduction_args, nullptr, stream));
+    checkCutlassRaw(reduction_op(reduction_args, nullptr, stream));
 
     return cudaSuccess;
   }

@@ -661,12 +661,12 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   // convert to nchw -> nhwc
   for (size_t i = 0; i < actvs.size(); ++i) {
     if (i >= end_cudnn_layer) {
-      c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+      // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
       actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
       ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
     }
   }
-  c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
+  // c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
 
   auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   
@@ -723,29 +723,37 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   }
   for (int example_idx = 0; example_idx < batch_count; example_idx += num_rows_to_compute) {
     // Wait all streams to finish
-    if (example_idx == 0) {
-      for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
-        checkCudaErrors(cudaEventRecord(events[i], NULL));
-      }
-      for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
-        checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
-      }
-    }
+    // if (example_idx == 0) {
+    //   for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    //     checkCudaErrors(cudaEventRecord(events[i], NULL));
+    //   }
+    //   for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    //     checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
+    //   }
+    // }
 
     // Compute wgrad of front layers using cuDNN
     LOG_STDERR("Compute wgrad of back layers using CUTLASS", verbose);
     // Compute wgrad of back layers using CUTLASS
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
+
+    for (size_t i=0; i < end_cudnn_layer; ++i) {
+      checkCudaErrors(cudaEventRecord(events[i], NULL));
+    }
+    for (size_t i=0; i < end_cudnn_layer; ++i) {
+      checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
+    }
+
     compute_single_per_example_gradient_cudnn(descriptors, partial_per_example_gradient, actvs, ograds, end_cudnn_layer, example_idx, quant);
 
     partial_per_example_gradient.index_put_({Slice(), (int64_t)partial_per_example_gradient_size},
                                             precomputed_per_example_norms.index({Slice(example_idx, example_idx + num_rows_to_compute)}));
 
     // Wait all streams to finish
-    for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    for (size_t i=0; i < end_cudnn_layer; ++i) {
       checkCudaErrors(cudaEventRecord(events[i], cuda_streams[i]));
     }
-    for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    for (size_t i=0; i < end_cudnn_layer; ++i) {
       checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
     }
 
@@ -774,12 +782,12 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       partial_per_batch_gradient.add(non_reweight_partial_per_example.sum({0}));
     }
 
-    for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
-      checkCudaErrors(cudaEventRecord(events[i], NULL));
-    }
-    for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
-      checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
-    }
+    // for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    //   checkCudaErrors(cudaEventRecord(events[i], NULL));
+    // }
+    // for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
+    //   checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
+    // }
 
     // torch::cuda::synchronize();
     TIME_PROFILE(clip_reduce_ms, time_profile);
