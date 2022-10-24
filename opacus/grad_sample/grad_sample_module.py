@@ -65,8 +65,8 @@ def create_or_accumulate_grad_sample(
                 device=grad_sample.device,
                 dtype=grad_sample.dtype,
             )
-            # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
-            param._current_grad_sample = grad_sample
+            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            # param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:

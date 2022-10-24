@@ -136,7 +136,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_desc));
     checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_desc,
                                         dtype,
-                                        CUDNN_TENSOR_NCHW,
+                                        CUDNN_TENSOR_NHWC,
                                         config->K,
                                         config->C,
                                         config->R,
@@ -144,7 +144,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->C,
@@ -153,7 +153,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->K,
@@ -162,7 +162,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_batch_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        CUDNN_TENSOR_NHWC,
                                         dtype,
                                         config->N,
                                         config->C,
@@ -171,7 +171,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_batch_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        CUDNN_TENSOR_NHWC,
                                         dtype,
                                         config->N,
                                         config->K,
@@ -659,13 +659,13 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float add_noise_ms = 0.0;
 
   // convert to nchw -> nhwc
-  for (size_t i = 0; i < actvs.size(); ++i) {
-    if (i >= end_cudnn_layer) {
-      // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
-      actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-      ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-    }
-  }
+  // for (size_t i = 0; i < actvs.size(); ++i) {
+  //   if (i >= end_cudnn_layer) {
+  //     // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+  //     actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+  //     ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+  //   }
+  // }
   // c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
 
   auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));

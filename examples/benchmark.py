@@ -141,8 +141,10 @@ def main():  # noqa: C901
         model = models.__dict__[args.architecture](
             pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c))
         )
+        model = model.to(memory_format=torch.channels_last)
 
         inputs = torch.randn(B, 3, args.input_size, args.input_size)
+        inputs = inputs.to(memory_format=torch.channels_last)
         inputs = inputs.expand(
             args.warm_up_steps + args.steps, B, 3, args.input_size, args.input_size
             ).reshape((args.warm_up_steps + args.steps) * B, 3, args.input_size, args.input_size)
