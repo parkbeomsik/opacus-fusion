@@ -38,7 +38,7 @@ using LayoutOutput = cutlass::layout::TensorNHWC;
 using MMAOp = cutlass::arch::OpClassSimt;
 
 // This code section describes CUDA SM architecture number
-using SmArch = cutlass::arch::Sm75;
+using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
 using ThreadblockShape = cutlass::gemm::GemmShape<{tb_shape[0]}, {tb_shape[1]}, {tb_shape[2]}>; // Threadblock tile shape
@@ -412,26 +412,26 @@ def main():
   inst_shape_2_cand = [4]
   split_k_slice_cand = [2, 4, 8, 16, 32, 64]
 
-  # tb_shape_0_cand = [128]
-  # tb_shape_1_cand = [128]
-  # tb_shape_2_cand = [32]
-  # mma_shape_0_cand = [64]
-  # mma_shape_1_cand = [64]
-  # mma_shape_2_cand = [32]
-  # inst_shape_0_cand = [1]
-  # inst_shape_1_cand = [1]
-  # inst_shape_2_cand = [4]
+  tb_shape_0_cand = [32]
+  tb_shape_1_cand = [32]
+  tb_shape_2_cand = [16]
+  mma_shape_0_cand = [16]
+  mma_shape_1_cand = [16]
+  mma_shape_2_cand = [8]
+  inst_shape_0_cand = [1]
+  inst_shape_1_cand = [1]
+  inst_shape_2_cand = [1]
 
   # problem = [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w]
   problems = [
 
-              # [1, 32, 32, 3, 64, 7, 7, 16, 16, 3, 3, 2, 2, 1, 1],
+              [1, 32, 32, 3, 64, 7, 7, 16, 16, 3, 3, 2, 2, 1, 1],
               [1, 224, 224, 3, 64, 7, 7, 112, 112, 3, 3, 2, 2, 1, 1],
 
-              # [1, 56, 56, 64, 64, 1, 1, 56, 56, 0, 0, 1, 1, 1, 1],
-              # [1, 56, 56, 64, 64, 3, 3, 56, 56, 1, 1, 1, 1, 1, 1],
-              # [1, 56, 56, 64, 256, 1, 1, 56, 56, 1, 1, 1, 1, 1, 1],
-              # [1, 56, 56, 256, 64, 1, 1, 56, 56, 1, 1, 1, 1, 1, 1]
+              [1, 56, 56, 64, 64, 1, 1, 56, 56, 0, 0, 1, 1, 1, 1],
+              [1, 56, 56, 64, 64, 3, 3, 56, 56, 1, 1, 1, 1, 1, 1],
+              [1, 56, 56, 64, 256, 1, 1, 56, 56, 1, 1, 1, 1, 1, 1],
+              [1, 56, 56, 256, 64, 1, 1, 56, 56, 1, 1, 1, 1, 1, 1]
               ]
 
   for problem in problems:
@@ -459,19 +459,19 @@ def main():
 
       exec_name = f'int8_wgrad_kernels/simt_iwgrad_{tb_shape[0]}x{tb_shape[1]}x{tb_shape[2]}_{mma_shape[0]}x{mma_shape[1]}x{mma_shape[2]}_{inst_shape[0]}x{inst_shape[1]}x{inst_shape[2]}_splitK_test'
 
-      if not os.path.isfile(exec_name): 
-        continue
-      
+      if not os.path.isfile(exec_name):       
+        # continue
+
         with open("test_wgrad_main.cu", "w") as f:
           f.write(get_source_code(problem, tb_shape, mma_shape, inst_shape, split_k_slice))
 
-        compile_ret = subprocess.run(f"nvcc -I/home/beomsik/dp/cutlass/include test_wgrad_main.cu -o {exec_name}", shell=True, capture_output=True)
+        compile_ret = subprocess.run(f"nvcc -gencode=arch=compute_80,code=compute_80 -I/home/beomsik/dp/cutlass/include test_wgrad_main.cu -o {exec_name}", shell=True, capture_output=True)
+        print(compile_ret.stderr)
         if compile_ret.returncode != 0:
           # print(f"{tb_shape}, {mma_shape}, {inst_shape} : compile error")
           continue
 
       ret = subprocess.run(f"{exec_name} {' '.join(map(lambda x: str(x), problem))} {split_k_slice}", shell=True, capture_output=True)
-      # print(ret.stderr)
 
       # print(f"{tb_shape}, {mma_shape}, {inst_shape} : {ret.stdout.decode()[:-1]} ms")
 

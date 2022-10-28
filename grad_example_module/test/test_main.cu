@@ -28,18 +28,18 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   using namespace cutlass::gemm::device;
 
   using Gemm = cutlass::gemm::device::GemmArray<
-    int8_t, cutlass::layout::ColumnMajor,
+    int8_t, cutlass::layout::RowMajor,
     int8_t, cutlass::layout::ColumnMajor,
     float, cutlass::layout::ColumnMajor,
     int32_t,
-    cutlass::arch::OpClassSimt,
-    cutlass::arch::Sm75,
-    cutlass::gemm::GemmShape<128, 128, 128>,
-    cutlass::gemm::GemmShape<128, 64, 4>,
-    cutlass::gemm::GemmShape<1, 1, 4>,
+    cutlass::arch::OpClassTensorOp,
+    cutlass::arch::Sm80,
+    cutlass::gemm::GemmShape<128, 128, 32>,
+    cutlass::gemm::GemmShape<32, 32, 32>,
+    cutlass::gemm::GemmShape<16, 8, 8>,
     cutlass::epilogue::thread::LinearCombination<
       float, 
-      1,
+      128 / cutlass::sizeof_bits<float>::value,
       int32_t, 
       float
     >
@@ -48,7 +48,7 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   Gemm gemm_op;
 
   Gemm::Arguments args(cutlass::gemm::GemmCoord(m, n, k),
-                       A, cutlass::layout::ColumnMajor(lda),
+                       A, cutlass::layout::RowMajor(lda),
                        B, cutlass::layout::ColumnMajor(ldb),
                        C, cutlass::layout::ColumnMajor(ldc),
                        C, cutlass::layout::ColumnMajor(ldc),
@@ -95,7 +95,7 @@ int main(int argc, char * argv[]) {
     cutlass_simt_igemm_int8_batched_gemm(m, n, k,
                                          1.0,
                                          (int8_t **)device_A_array,
-                                         m,
+                                         k,
                                          (int8_t **)device_B_array,
                                          k,
                                          (float **)device_C_array,
@@ -116,7 +116,7 @@ int main(int argc, char * argv[]) {
     checkCudaErrors(cutlass_simt_igemm_int8_batched_gemm(m, n, k,
                                                         1.0,
                                                         (int8_t **)device_A_array,
-                                                        m,
+                                                        k,
                                                         (int8_t **)device_B_array,
                                                         k,
                                                         (float **)device_C_array,

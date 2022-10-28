@@ -119,7 +119,7 @@ cutlass_wgrad_grouped/build
 
 # nvvp files
 **/*.nvvp
-**/.vscode
+**/.vscode/
 
 .circleci
 .github

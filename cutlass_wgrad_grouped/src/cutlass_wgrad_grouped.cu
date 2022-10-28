@@ -2,11 +2,18 @@
 // #include "base_operation.h"
 // #include "cutlass_error.h"
 #include "cutlass_wgrad_grouped.h"
-#include "initialize_all.h"
+#include "initialize_swgrad_grouped.h"
+
+#if defined(_USE_TENSOR_CORE)
+#include "initialize_iwgrad_tensorop_grouped.h"
+#else
+#include "initialize_iwgrad_grouped.h"
+#endif
+
 #include "wgrad_grouped_operation.h"
 
 #include "cuda_runtime.h"
-#include "cuda_error_helper.h"
+// #include "cuda_error_helper.h"
 
 #include "cutlass/conv/conv2d_problem_size.h"
 #include "cutlass/layout/tensor.h"
@@ -30,10 +37,16 @@ void ** device_ptr_D;
 
 int problem_count;
 
+#if defined(_USE_TENSOR_CORE)
+void initialize_int_tensorop() {
+    initialize_iwgrad_tensorop_grouped(operations);
+}
+#else
 void initialize_int() {
 
     initialize_iwgrad_grouped(operations);
 }
+#endif
 
 void initialize_float() {
 
@@ -124,14 +137,22 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     }
     
     void * device_semaphore;
+    printf("Allocate %d B device workspace\n", max_workspace_size);
     checkCudaErrors(cudaMalloc(&device_semaphore, max_workspace_size));
     device_workspaces.push_back(device_semaphore);
 
-    for (auto operation_with_workspace : operations_with_workspaces) {
-        checkCUTLASS(operation_with_workspace.operation->initialize(&wgrad_config, device_semaphore, operation_with_workspace.host_workspace));
-    }
+    // for (auto operation_with_workspace : operations_with_workspaces) {
+    //     checkCUTLASS(operation_with_workspace.operation->initialize(&wgrad_config, device_semaphore, operation_with_workspace.host_workspace));
+    // }
+    operations_with_workspaces.erase(std::remove_if(
+        operations_with_workspaces.begin(), operations_with_workspaces.end(), 
+        [&](OperationWithWorkspace op) { 
+            return op.operation->initialize(&wgrad_config, device_semaphore, op.host_workspace) != cutlass_wgrad_grouped::Status::kSuccess; }), 
+            operations_with_workspaces.end());
 
-    assert(operations_with_workspaces.size() == operations.size());
+    printf("%d operations initialized\n", operations_with_workspaces.size());
+
+    // assert(operations_with_workspaces.size() == operations.size());
 }
 
 template void initialize_problems<int8_t>(std::vector<Conv2dConfig> const &);
@@ -159,24 +180,26 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
                               void ** ptr_C,
                               void ** ptr_D) {
 
-    assert(operations_with_workspaces.size() == operations.size());
+    // assert(operations_with_workspaces.size() == operations.size());
 
-    std::vector<float> runtime_ms_list(operations.size(), 100000.0);
+    std::vector<float> runtime_ms_list(operations_with_workspaces.size(), 100000.0);
     // runtime_ms_list.resize(operations.size());
     std::cout << "Get best operation..." << std::endl;
 
-    for (int i = 0; i < operations.size(); ++i) {
-        auto operation = operations.at(i);
+    cudaEvent_t events[2];
+
+    for (auto & event : events) {
+        checkCudaErrors(cudaEventCreate(&event));
+    }
+
+    for (int i = 0; i < operations_with_workspaces.size(); ++i) {
+
+        auto operation = operations_with_workspaces.at(i).operation;
         auto host_workspace = operations_with_workspaces.at(i).host_workspace;
 
         checkCUTLASS(operation->update_ptrs(ptr_A, ptr_B, ptr_C, ptr_D, problem_count, host_workspace));
 
-        cudaEvent_t events[2];
-
         // Warm up
-        for (auto & event : events) {
-            checkCudaErrors(cudaEventCreate(&event));
-        }
 
         // Record an event at the start of a series of GEMM operations
         checkCudaErrors(cudaEventRecord(events[0]));
@@ -186,31 +209,36 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
             result = operation->run(host_workspace);
         }
 
-        checkCudaErrors(cudaEventRecord(events[1]));
-        checkCudaErrors(cudaEventSynchronize(events[1]));
+        cudaError_t ret = cudaEventRecord(events[1]);
+
+        if (ret == 0) {
+            ret = cudaEventSynchronize(events[1]);
+        }
 
         float runtime_ms;
-        checkCudaErrors(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
-
-        // checkCudaErrors(cudaDeviceSynchronize());
-
-        if (result == Status::kSuccess && runtime_ms < 30.0) {
-            // Measure runtime
-
-            // Record an event at the start of a series of GEMM operations
-            checkCudaErrors(cudaEventRecord(events[0]));
-
-            for (int iter = 0; iter < 20; ++iter) {
-                result = operation->run(host_workspace);
-            }
-
-            checkCudaErrors(cudaEventRecord(events[1]));
-            checkCudaErrors(cudaEventSynchronize(events[1]));
-
+        // Check operation success
+        if (ret == 0) {
             checkCudaErrors(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
 
-            for (auto & event : events) {
-                checkCudaErrors(cudaEventDestroy(event));
+            // checkCudaErrors(cudaDeviceSynchronize());
+
+            if (result == Status::kSuccess && runtime_ms < 30.0) {
+                // Measure runtime
+
+                // Record an event at the start of a series of GEMM operations
+                checkCudaErrors(cudaEventRecord(events[0]));
+
+                for (int iter = 0; iter < 20; ++iter) {
+                    result = operation->run(host_workspace);
+                }
+
+                checkCudaErrors(cudaEventRecord(events[1]));
+                checkCudaErrors(cudaEventSynchronize(events[1]));
+
+                checkCudaErrors(cudaEventElapsedTime(&runtime_ms, events[0], events[1]));
+            }
+            else {
+                runtime_ms = 2000.0;
             }
         }
         else {
@@ -232,7 +260,11 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
         // 
     }
 
-    assert(runtime_ms_list.size() == operations.size());
+    for (auto & event : events) {
+        checkCudaErrors(cudaEventDestroy(event));
+    }
+
+    assert(runtime_ms_list.size() == operations_with_workspaces.size());
 
     float min_runtime_ms = 10000.0;
     OperationWithWorkspace best_operation {NULL, NULL};
@@ -243,16 +275,16 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
         }
     }
 
-    std::cout << best_operation.operation->name << std::endl;
+    std::cout << best_operation.operation->name << "( " << min_runtime_ms << " ms )" << std::endl;
 
     return best_operation;
 }
 
-Status run(OperationWithWorkspace operation_with_workspace) {
+Status run(OperationWithWorkspace& operation_with_workspace) {
     return operation_with_workspace.operation->run(operation_with_workspace.host_workspace);
 }
 
-Status update_ptrs(OperationWithWorkspace operation_with_workspace,
+Status update_ptrs(OperationWithWorkspace& operation_with_workspace,
                    void ** ptr_A,
                    void ** ptr_B,
                    void ** ptr_C,

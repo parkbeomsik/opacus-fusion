@@ -5,6 +5,7 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
+#include <unistd.h>
 
 #include "structure.h"
 #include "error_helper.h"
@@ -338,9 +339,9 @@ void set_cutlass_workspace(size_t end_cudnn_layer, int batch_size, bool quant=fa
 
   if (quant) {
     cutlass_wgrad_grouped::initialize_problems<int8_t>(configs);
-  }
+  } 
   else {
-    cutlass_wgrad_grouped::initialize_problems<float>(configs);
+    cutlass_wgrad_grouped::initialize_problems<float>(configs); 
   }
 
   // Allocate device memory to store device pointers
@@ -409,6 +410,9 @@ void set_cutlass_device_ptrs(size_t end_cudnn_layer,
     size_t ograds_offset = ograds.at(end_cudnn_layer + problem_idx).numel() / batch_size;
     size_t actvs_offset = actvs.at(end_cudnn_layer + problem_idx).numel() / batch_size;
 
+    // printf("%p - %p ( %lld )\n", ograds_ptr, ograds_ptr + ograds.at(end_cudnn_layer + problem_idx).numel(), ograds.at(end_cudnn_layer + problem_idx).numel());
+    // printf("%p - %p ( %lld )\n", actvs_ptr, actvs_ptr + actvs.at(end_cudnn_layer + problem_idx).numel(), actvs.at(end_cudnn_layer + problem_idx).numel());
+
     // std::cout << ograds.at(end_cudnn_layer + problem_idx).is_contiguous() << std::endl;
     // std::cout << actvs.at(end_cudnn_layer + problem_idx).is_contiguous() << std::endl;
 
@@ -419,6 +423,7 @@ void set_cutlass_device_ptrs(size_t end_cudnn_layer,
       actvs_ptr += actvs_offset;
     }
   }
+  // checkCudaErrors(cudaDeviceSynchronize());
 
   for (int row = 0; row < num_rows_to_compute; ++row) {
     for (size_t problem_idx = 0; problem_idx < problem_count; ++problem_idx) {
@@ -427,11 +432,12 @@ void set_cutlass_device_ptrs(size_t end_cudnn_layer,
     }
   }
 
+  checkCudaErrors(cudaDeviceSynchronize());
+
   checkCudaErrors(cudaMemcpyAsync((void*)device_ptr_A, (void*)&host_ptr_A[0], sizeof(void*)*problem_count*batch_size, cudaMemcpyHostToDevice));
   checkCudaErrors(cudaMemcpyAsync((void*)device_ptr_B, (void*)&host_ptr_B[0], sizeof(void*)*problem_count*batch_size, cudaMemcpyHostToDevice));
   checkCudaErrors(cudaMemcpyAsync((void*)device_ptr_C, (void*)&host_ptr_C[0], sizeof(void*)*problem_count*num_rows_to_compute, cudaMemcpyHostToDevice));
   checkCudaErrors(cudaMemcpyAsync((void*)device_ptr_D, (void*)&host_ptr_D[0], sizeof(void*)*problem_count*num_rows_to_compute, cudaMemcpyHostToDevice));
-
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -441,31 +447,43 @@ void set_cutlass_best_operation(size_t end_cudnn_layer,
                                 int batch_size,
                                 std::vector<torch::Tensor>& actvs,
                                 std::vector<torch::Tensor>& ograds,
-                                bool quant=false) {
-
+                                bool quant=false,
+                                bool test=true) {
+  printf("set_cutlass_best_operation start %d %d\n", descriptors.size(), end_cudnn_layer);
   if (descriptors.size() - end_cudnn_layer == 0) {
     return;
   }
-
+  // torch::cuda::synchronize();
+  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  printf("size %lld\n", num_rows_to_compute * partial_per_example_gradient_size);
+  auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  printf("Alloc partial_per_example_gradient\n"); 
   auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-  // Set CUTLASS device pointers
+  printf("partial_per_example_gradient\n");
+  // Set CUTLASS device pointers 
   std::vector<void *> wgrads_ptrs;
   for (int row = 0; row < num_rows_to_compute; ++row) {
     float * wgrads_ptr = (float *)partial_per_example_gradient.index({row}).data_ptr();
-    for (size_t i = 0; i < descriptors.size(); ++i) {
-      wgrads_ptrs.push_back(wgrads_ptr);
-      wgrads_ptr += descriptors.at(i).grad_weight_per_example_size;
+    for (size_t i = 0; i < descriptors.size(); ++i) { 
+      wgrads_ptrs.push_back(wgrads_ptr); 
+      wgrads_ptr += descriptors.at(i).grad_weight_per_example_size; 
+      // if (descriptors.at(i).grad_weight_per_example_size % 128 != 0) {
+      //   wgrads_ptr += (128 - (descriptors.at(i).grad_weight_per_example_size % 128));
+      // }
     }
   }
-
+  printf("set_cutlass_device_ptrs\n");
   if (quant) {
     set_cutlass_device_ptrs<int8_t>(end_cudnn_layer, batch_size, actvs, ograds, wgrads_ptrs, wgrads_ptrs);
   }
   else {
     set_cutlass_device_ptrs<float>(end_cudnn_layer, batch_size, actvs, ograds, wgrads_ptrs, wgrads_ptrs);
   }
+  checkCudaErrors(cudaDeviceSynchronize()); 
 
-  best_operation_with_workspace = cutlass_wgrad_grouped::get_best_operation(device_ptr_A, device_ptr_B, device_ptr_C, device_ptr_D);
+  if (test) {
+    best_operation_with_workspace = cutlass_wgrad_grouped::get_best_operation(device_ptr_A, device_ptr_B, device_ptr_C, device_ptr_D);
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -595,20 +613,23 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
   
   int batch_count = 32;
 
+  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
   auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   // auto partial_per_example_gradient2 = torch::zeros({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  printf("partial_per_example_gradient\n");
   
+  std::vector<void *> wgrads_ptrs;
   // Set CUTLASS device pointers
-  if (descriptors.size() - end_cudnn_layer > 0) {
-    std::vector<void *> wgrads_ptrs(descriptors.size() * num_rows_to_compute);
-    int64_t offset = 0;
+  if (descriptors.size() - end_cudnn_layer != 0) {
     for (int row=0 ; row < num_rows_to_compute; ++row) {
       float * wgrads_ptr = (float *)partial_per_example_gradient.index({row}).data_ptr();
       for (size_t i = 0; i < descriptors.size(); ++i) {
-        wgrads_ptrs.at(row * descriptors.size() + i) = wgrads_ptr;
-        wgrads_ptr += descriptors.at(i).grad_weight_per_example_size;
+        wgrads_ptrs.push_back(wgrads_ptr); 
+        wgrads_ptr += descriptors.at(i).grad_weight_per_example_size; 
       }
     }
+    printf("set_cutlass_device_ptrs\n");
     if (quant) {
       set_cutlass_device_ptrs<int8_t>(end_cudnn_layer, batch_count, actvs, ograds, wgrads_ptrs, wgrads_ptrs);
     }
@@ -617,10 +638,18 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
     }
     // checkCudaErrors(cudaDeviceSynchronize());
   }
-
+  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  torch::cuda::synchronize();
+  checkCudaErrors(cudaDeviceSynchronize());
+  // sleep(10); 
+  // set_cutlass_best_operation(end_cudnn_layer, batch_count, actvs, ograds, quant, false);
+  // auto _ = cutlass_wgrad_grouped::get_best_operation(device_ptr_A, device_ptr_B, device_ptr_C, device_ptr_D);
   for (int example_idx = 0; example_idx < batch_count; example_idx += num_rows_to_compute) {
+    printf("example_idx = %d\n", example_idx);
     // Compute wgrad of front layers using cuDNN
     compute_single_per_example_gradient_cudnn(descriptors, partial_per_example_gradient, actvs, ograds, end_cudnn_layer, example_idx, quant);
+
+    checkCudaErrors(cudaDeviceSynchronize());
 
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
 
@@ -993,18 +1022,26 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     auto min_runtime_us = std::chrono::microseconds(1000000000);
     auto prev_runtime_us = std::chrono::microseconds(1000000000);
     auto increase_count = 0;
-    for (size_t end_cudnn_layer = 0; end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) {
+    for (size_t end_cudnn_layer = (quant? 1 : 0); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) {
       // Initialize cutlass_wgrad_grouped library
       if (quant) {
-        cutlass_wgrad_grouped::initialize_int();
+        cudaDeviceProp deviceProp;
+        cudaGetDeviceProperties(&deviceProp, 0);
+
+          // cutlass_wgrad_grouped::initialize_int_tensorop(); 
+#if defined(_USE_TENSOR_CORE)
+          cutlass_wgrad_grouped::initialize_int_tensorop();
+#else
+          cutlass_wgrad_grouped::initialize_int();
+#endif
       }
       else {
-        cutlass_wgrad_grouped::initialize_float();
+        cutlass_wgrad_grouped::initialize_float(); 
       }
 
       LOG_STDERR("Set cudnn workspace and compute non-reweight per-example gradient size", verbose);
       // Set cudnn workspace and compute non-reweight per-example gradient size
-      set_cudnn_workspace(end_cudnn_layer);
+      set_cudnn_workspace(end_cudnn_layer); 
 
       LOG_STDERR("Set cutlass workspace", verbose);
       // Set cutlass workspace
@@ -1074,10 +1111,14 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
 
     // Initialize cutlass_wgrad_grouped library
     if (quant) {
+#if defined(_USE_TENSOR_CORE)
+      cutlass_wgrad_grouped::initialize_int_tensorop();
+#else
       cutlass_wgrad_grouped::initialize_int();
+#endif
     }
     else {
-      cutlass_wgrad_grouped::initialize_float();
+      cutlass_wgrad_grouped::initialize_float(); 
     }
 
     // Set cutlass workspace with best end-cudnn-layer
@@ -1123,12 +1164,12 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             max_norm,
                                             noise_multiplier,
                                             quant,
-                                            false,
+                                            true,
                                             false,
                                             false); 
       }
 
-      checkCudaErrors(cudaDeviceSynchronize());
+      checkCudaErrors(cudaDeviceSynchronize()); 
       auto startTime = std::chrono::high_resolution_clock::now();
 
       // Run clip_and_reduce_grads

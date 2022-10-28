@@ -125,7 +125,11 @@ extern void ** device_ptr_B;
 extern void ** device_ptr_C;
 extern void ** device_ptr_D;
 
+#if defined(_USE_TENSOR_CORE)
+void initialize_int_tensorop();
+#else
 void initialize_int();
+#endif
 void initialize_float();
 
 // size_t get_device_problem_size_in_bytes (int problem_count);
