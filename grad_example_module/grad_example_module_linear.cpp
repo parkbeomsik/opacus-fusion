@@ -190,7 +190,7 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
       checkCudaErrors(cutlass_simt_igemm_int8_batched_gemm(m, n, k,
                                                            alpha_float,
                                                            (int8_t **)descriptor.A_array + example_idx*num_layers,
-                                                           m,
+                                                           k,
                                                            (int8_t **)descriptor.B_array + example_idx*num_layers,
                                                            k,
                                                            (float **)descriptor.C_array, m,

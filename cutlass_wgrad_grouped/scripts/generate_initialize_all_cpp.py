@@ -1,4 +1,14 @@
-def get_string(kernel_names):
+def get_string(kernel_names, dtype, opclass):
+
+    if opclass == "simt":
+        opclass_type = "OpClassSimt"
+    elif opclass == "tensorop":
+        opclass_type = "OpClassTensorOp"
+
+    if dtype == "int":
+        wgrad_name = "iwgrad"
+    elif dtype == "float":
+        wgrad_name = "swgrad"
 
     all_function = ""
 
@@ -7,12 +17,11 @@ def get_string(kernel_names):
 
     string = f"""
 #include <vector>
-#include "base_operation.h"
-#include "initialize_all.h"
+#include "initialize_{wgrad_name}_{opclass}_grouped.h"
 
 namespace cutlass_wgrad_grouped {{
 
-void initialize_swgrad_grouped(std::vector<Operation*>& operations) {{
+void initialize_{wgrad_name}_{opclass}_grouped(std::vector<Operation*>& operations) {{
 {all_function}
 }}
 

@@ -31,16 +31,16 @@ using LayoutOutput = cutlass::layout::TensorNHWC;
 using MMAOp = cutlass::arch::OpClassSimt;
 
 // This code section describes CUDA SM architecture number
-using SmArch = cutlass::arch::Sm75;
+using SmArch = cutlass::arch::Sm80;
 
 // This code section describes the tile size a thread block will compute
-using ThreadblockShape = cutlass::gemm::GemmShape<128, 256, 8>; // Threadblock tile shape
+using ThreadblockShape = cutlass::gemm::GemmShape<32, 32, 16>; // Threadblock tile shape
 
 // This code section describes tile size a warp will compute
 using WarpShape = cutlass::gemm::GemmShape<16, 16, 8>;          // Warp tile shape
 
 // This code section describes the size of MMA op
-using InstructionShape = cutlass::gemm::GemmShape<1, 1, 4>;    // TensorCore instruction shape
+using InstructionShape = cutlass::gemm::GemmShape<1, 1, 1>;    // TensorCore instruction shape
 
 // This code section describes how threadblocks are scheduled on GPU
 using SwizzleThreadBlock = cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>;

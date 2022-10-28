@@ -35,7 +35,7 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   using namespace cutlass::gemm::device;
 
   using Gemm = cutlass::gemm::device::GemmArray<
-    int8_t, cutlass::layout::ColumnMajor,
+    int8_t, cutlass::layout::RowMajor,
     int8_t, cutlass::layout::ColumnMajor,
     float, cutlass::layout::ColumnMajor,
     int32_t,
@@ -55,7 +55,7 @@ cudaError_t cutlass_simt_igemm_int8_batched_gemm(
   Gemm gemm_op;
 
   Gemm::Arguments args(cutlass::gemm::GemmCoord(m, n, k),
-                       A, cutlass::layout::ColumnMajor(lda),
+                       A, cutlass::layout::RowMajor(lda),
                        B, cutlass::layout::ColumnMajor(ldb),
                        C, cutlass::layout::ColumnMajor(ldc),
                        C, cutlass::layout::ColumnMajor(ldc),
@@ -102,7 +102,7 @@ int main(int argc, char * argv[]) {{
     cutlass_simt_igemm_int8_batched_gemm(m, n, k,
                                          1.0,
                                          (int8_t **)device_A_array,
-                                         m,
+                                         k,
                                          (int8_t **)device_B_array,
                                          k,
                                          (float **)device_C_array,
@@ -123,7 +123,7 @@ int main(int argc, char * argv[]) {{
     checkCudaErrors(cutlass_simt_igemm_int8_batched_gemm(m, n, k,
                                                         1.0,
                                                         (int8_t **)device_A_array,
-                                                        m,
+                                                        k,
                                                         (int8_t **)device_B_array,
                                                         k,
                                                         (float **)device_C_array,
@@ -166,9 +166,9 @@ def main():
 
   # problem = [m, n, k, batch_count]
   problems = [
-              # [768, 768, 32, 48],
-              # [3072, 768, 32, 12],
-              # [768, 3072, 32, 12],
+              [768, 768, 32, 48],
+              [3072, 768, 32, 12],
+              [768, 3072, 32, 12],
               [768, 768, 256, 48],
               [3072, 768, 256, 12],
               [768, 3072, 256, 12],
@@ -219,7 +219,7 @@ def main():
 
       ret = subprocess.run(f"{exec_name} {' '.join(map(lambda x: str(x), problem))}", shell=True, capture_output=True)
 
-      print(f"{tb_shape}, {mma_shape}, {inst_shape} : {ret.stdout.decode()[:-1]} ms")
+      # print(f"{tb_shape}, {mma_shape}, {inst_shape} : {ret.stdout.decode()[:-1]} ms")
       try:
         if float(ret.stdout.decode()[:-1]) < min_runtime:
           min_runtime = float(ret.stdout.decode()[:-1])

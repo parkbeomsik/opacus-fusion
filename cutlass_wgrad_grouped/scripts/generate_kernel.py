@@ -1,6 +1,6 @@
 def get_kernel_name(dtype, op_class, tb_shape, mma_shape, inst_shape, num_stages):
     kernel_name = f"cutlass_"
-    kernel_name += f"{'simt' if op_class == 'OpClassSimt' else 'tensorop'}_"
+    kernel_name += f"{op_class}_"
     kernel_name += "s" if dtype == "float" else "i"
     kernel_name += "wgrad_grouped_optimized_"
     kernel_name += f"{str(tb_shape[0])}x{str(tb_shape[1])}x{str(tb_shape[2])}_"
@@ -23,6 +23,11 @@ def get_string(dtype, op_class, tb_shape, mma_shape, inst_shape, num_stages):
         element_input = "int8_t"
         element_output = "float"
         element_compute = "int32_t"
+
+    if op_class == "simt":
+        op_class_type = "OpClassSimt"
+    elif op_class == "tensorop":
+        op_class_type = "OpClassTensorOp"
 
     string = f"""
 /*
@@ -49,13 +54,13 @@ using {kernel_name}_base = typename cutlass::conv::kernel::DefaultConv2dWgradGro
     cutlass::layout::TensorNHWC,
     {element_output}, cutlass::layout::TensorNHWC,
     {element_compute}, 
-    cutlass::arch::{op_class}, 
+    cutlass::arch::{op_class_type}, 
     cutlass::arch::Sm80,
     cutlass::gemm::GemmShape<{tb_shape[0]}, {tb_shape[1]}, {tb_shape[2]}>,
     cutlass::gemm::GemmShape<{mma_shape[0]}, {mma_shape[1]}, {mma_shape[2]}>,
     cutlass::gemm::GemmShape<{inst_shape[0]}, {inst_shape[1]}, {inst_shape[2]}>,
     cutlass::epilogue::thread::LinearCombination<
-        {element_output}, 1,
+        {element_output}, {'1' if op_class == 'simt' else f'128 / cutlass::sizeof_bits<{element_compute}>::value'},
         {element_compute}, {element_output}>,
     cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle, 
     {num_stages},
