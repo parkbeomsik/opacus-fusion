@@ -2,7 +2,7 @@ import subprocess
 
 def main():
   # problem = [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w]
-  exec_name = "./kernel_test_main"
+  exec_name = "./test_iwgrad_simt"
   problems = [
 
               [1, 32, 32, 3, 64, 7, 7, 16, 16, 3, 3, 2, 2, 1, 1],

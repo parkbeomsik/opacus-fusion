@@ -9,7 +9,7 @@ if "A100" in torch.cuda.get_device_name():
 else:
     is_sm_80 = False
 
-gencode = "-gencode=arch=compute_80,code=compute_80" if is_sm_80 else ""
+gencode = ["-gencode=arch=compute_80,code=compute_80"] if is_sm_80 else []
 cxx_flags = ["-D_USE_TENSOR_CORE"] if is_sm_80 else []
 # cxx_flags = []
 
@@ -35,7 +35,7 @@ setup(
                       ],
         library_dirs=["./", "/home/beomsik/dp/opacus-fusion/cutlass_wgrad_grouped/build/lib"],
         extra_compile_args={'cxx': cxx_flags, # -g
-                            'nvcc': [gencode]},
+                            'nvcc': gencode},
         )
     ],
     cmdclass={

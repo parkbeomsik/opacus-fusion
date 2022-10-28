@@ -5,6 +5,31 @@
 #include "cuda_runtime.h"
 
 // Base class for all operations
+class GemmBatchedOperation {
+public:
+  std::string name;
+
+  GemmBatchedOperation(std::string name) {this->name = name;};
+  virtual ~GemmBatchedOperation() { }
+
+  virtual cudaError_t run(
+                int m,
+                int n,
+                int k,
+                float alpha,
+                int8_t const * const *A,
+                int lda,
+                int8_t const * const *B,
+                int ldb,
+                float * const *C,
+                int ldc,
+                float beta,
+                int batch_count,
+                cudaStream_t stream) = 0;
+
+};
+
+// Base class for Conv operations
 class Operation {
 public:
   std::string name;

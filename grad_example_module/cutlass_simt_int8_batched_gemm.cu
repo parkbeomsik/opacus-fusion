@@ -35,7 +35,9 @@ public:
       1,
       int32_t, 
       float
-    >
+    >,
+    cutlass::gemm::threadblock::GemmBatchedIdentityThreadblockSwizzle,
+    2
   >;
 
   Gemm gemm_op;
