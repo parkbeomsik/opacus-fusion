@@ -1,8 +1,18 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+import argparse
 
 import torch
 import os
+
+parser = argparse.ArgumentParser(description="Install grad_example_module")
+parser.add_argument(
+    "--cutlass_path", type=str, required=True, help="Path of cutlass"
+)
+parser.add_argument(
+    "--cutlass_wgrad_grouped_path", type=str, required=True, help="Path of cutlass_wgrad_grouped"
+)
+args = parser.parse_args()
 
 if "A100" in torch.cuda.get_device_name():
     is_sm_80 = True
@@ -13,7 +23,7 @@ gencode = ["-gencode=arch=compute_80,code=compute_80"] if is_sm_80 else []
 cxx_flags = ["-D_USE_TENSOR_CORE"] if is_sm_80 else []
 # cxx_flags = []
 
-os.system("nvcc -Xcompiler -fPIC -std=c++14  -I/home/beomsik/dp/opacus-fusion/cutlass_wgrad_grouped/build/include -I/home/beomsik/dp/cutlass/include cutlass_simt_int8_wgrad.cu -c -o libcutlass_simt_int8_wgrad.o")
+os.system(f"nvcc -Xcompiler -fPIC -std=c++14  -I{args.cutlass_wgrad_grouped_path}/build/include -I{args.cutlass_path}/include cutlass_simt_int8_wgrad.cu -c -o libcutlass_simt_int8_wgrad.o")
 os.system("ar rcs libcutlass_simt_int8_wgrad.a libcutlass_simt_int8_wgrad.o")
 
 setup(
@@ -31,10 +41,10 @@ setup(
         ], 
         libraries=["cudnn", "cutlass_wgrad_grouped", "cutlass_simt_int8_wgrad"],
         include_dirs=[#"/home/beomsik/cuda-11.0/include",
-                      "/home/beomsik/dp/opacus-fusion/cutlass_wgrad_grouped/build/include",
-                      "/home/beomsik/dp/cutlass/include"
+                      f"{args.cutlass_wgrad_grouped_path}/build/include",
+                      f"{args.cutlass_path}/include"
                       ],
-        library_dirs=["./", "/home/beomsik/dp/opacus-fusion/cutlass_wgrad_grouped/build/lib"],
+        library_dirs=["./", f"{args.cutlass_wgrad_grouped_path}/build/lib"],
         extra_compile_args={'cxx': cxx_flags, # -g
                             'nvcc': gencode},
         )
