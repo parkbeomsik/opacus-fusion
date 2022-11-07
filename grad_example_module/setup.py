@@ -25,6 +25,7 @@ setup(
             'compute_scaling_factor_cuda.cu',
             'grad_example_module.cpp',
             'quantize.cu',
+            'add_noise.cu',
             'cutlass_simt_int8_batched_gemm.cu',
             # 'cutlass_simt_int8_wgrad.cu'
         ], 

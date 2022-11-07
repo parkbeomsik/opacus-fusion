@@ -8,10 +8,10 @@ CPU_AFFINITY=0-2
 import torch
 
 if "V100" in torch.cuda.get_device_name():
-    LOG_FILE_NAME="results/v100_result.csv"
+    LOG_FILE_NAME="results/v100_throughput.csv"
     MAX_BATCH_SIZE_FILE_NAME="results/V100_max_batch_size.json"
 elif "A100" in torch.cuda.get_device_name():
-    LOG_FILE_NAME="results/a100_result.csv"
+    LOG_FILE_NAME="results/a100_throughput.csv"
     MAX_BATCH_SIZE_FILE_NAME="results/A100_max_batch_size.json"    
 
 # Batch size configuration
@@ -66,13 +66,13 @@ for case in experiments:
         quant = True
         algo = "elegant"
 
-    batch_size = batch_size_dict[" ".join((model_type, architecture, input_size, "naive"))]
+    batch_size = batch_size_dict[" ".join((model_type, architecture, input_size, algo))]
 
-    args = f"nice -n 10 taskset -c 0-20 python benchmark.py --steps 100 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} {'--quant' if quant else ''} --batch_size {batch_size} --profile_time --log_file {LOG_FILE_NAME}"
+    args = f"nice -n 10 taskset -c 0-20 python benchmark.py --steps 100 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} {'--quant' if quant else ''} --batch_size {batch_size} --profile_time --profile_throughput --log_file {LOG_FILE_NAME}"
     print(args)
     ret = subprocess.run(args, shell=True)
     return_code = ret.returncode
     if return_code != 0:
         print("Failed!!")
         print(args)
-        exit(0)
+        # exit(0)

@@ -4,6 +4,8 @@ import torch
 # Our module!
 import custom_rnn
 
+from opacus.custom_tensor import GradOutputs
+
 input_actvs = []
 output_grads = []
 

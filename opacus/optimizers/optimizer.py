@@ -423,6 +423,10 @@ class DPOptimizer(Optimizer):
             per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
                 max=1.0
             )
+            print("per_sample_norms")
+            print(per_sample_norms)
+            print("scaling_factors")
+            print(per_sample_clip_factor*100)
 
             for p in self.params:
                 _check_processed_flag(p.grad_sample)
@@ -542,11 +546,12 @@ class DPOptimizer(Optimizer):
                             pad_h, pad_w = layer.padding
                             stride_h, stride_w = layer.stride
                             dilation_h, dilation_w = layer.dilation
+                            print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
-                                                                                dilation_h, dilation_w, int(P*Q/split_k_size)+1))
-                            # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
-                            # print(f"{i} {'x'.join(args)}")
+                                                                                dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
+                            args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
+                            print(f"{i} {'x'.join(args)}")
                             # i += 1
 
                     self._trainable_modules_cache = list(trainable_modules(self.module))
@@ -598,7 +603,7 @@ class DPOptimizer(Optimizer):
                 precomputed_norms = [torch.stack(linear_norms, dim=1).norm(2, dim=1)]
                 
                 profiler.record("Clip/reduce")
-                
+                print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
                     grad_example_module.get_clip_and_reduced_grads_conv(self.configs, activations, grad_outputs,
@@ -613,6 +618,8 @@ class DPOptimizer(Optimizer):
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+                profiler.add_memory_explicit("Workspace", result_grad_example_module.get_workspace_size())
+                print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
 
                 per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
 
@@ -1032,7 +1039,6 @@ class DPOptimizer(Optimizer):
                     precomputed_norms = [torch.zeros((self.batch_size,)).cuda()]
                 
                 profiler.record("Clip/reduce")
-
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
                     grad_example_module.get_clip_and_reduced_grads_linear(self.configs, activations, grad_outputs,
@@ -1167,6 +1173,21 @@ class DPOptimizer(Optimizer):
 
                     layer.activations = []
 
+        # Save gradients
+        if config.grad_save_path:
+            grad_dict = {}
+            for name, p in self.module.named_parameters():
+                if p.requires_grad_opacus:
+                    # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+                    if len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                        N, C, H, W = p.shape
+                        grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
+                    else:
+                        grad_dict[name] = p.summed_grad.view_as(p)
+                    # print(p.summed_grad.view_as(p).stride())
+            torch.save(grad_dict, config.grad_save_path)
+
+
     def add_noise(self):
         """
         Adds noise to clipped gradients. Stores clipped and noised result in ``p.grad``
@@ -1184,7 +1205,11 @@ class DPOptimizer(Optimizer):
                 )
                 p.grad = (p.summed_grad + noise).view_as(p)
             else:
-                p.grad = p.summed_grad.view_as(p)
+                if len(p.shape) == 4:
+                    K, C, R, S = p.shape
+                    p.grad = p.summed_grad.view([K, R, S, C]).permute(0, 3, 1, 2)
+                else:
+                    p.grad = p.summed_grad.view_as(p)
 
             _mark_as_processed(p.summed_grad)
 

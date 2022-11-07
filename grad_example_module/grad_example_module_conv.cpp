@@ -1,6 +1,7 @@
 #include <torch/extension.h>
 #include "ATen/cudnn/Handles.h"
 #include <c10/cuda/CUDAStream.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 
 #include <vector>
 #include <chrono>
@@ -18,6 +19,7 @@
 
 #include "grad_example_module_conv.h"
 #include "utils.h"
+#include "add_noise.h"
 
 #define THRESHOLD_INCREASE_COUNT_NON_CUDNN 4
 #define THRESHOLD_INCREASE_COUNT_NON_REWEIGHT 10
@@ -31,7 +33,7 @@ bool _first_run = true;
 
 std::vector<Conv2dDescriptor> descriptors;
 
-size_t partial_per_example_gradient_size = 0;
+int64_t partial_per_example_gradient_size = 0;
 size_t non_reweight_per_example_gradient_size = 0;
 size_t best_end_non_reweight_layer = 3;
 size_t best_end_cudnn_layer = 3;
@@ -39,6 +41,10 @@ size_t best_end_cudnn_layer = 3;
 size_t max_bwd_filter_batch_algo_best_workspace_size = 0;
 torch::Tensor tensor_for_bwd_filter_batch_workspace;
 void * bwd_filter_batch_workspace = NULL;
+
+
+size_t total_ws_size = 0;
+size_t total_per_batch_cudnn_workspace = 0;
 
 #define _N_CUDA_STREAMS 10
 cudaStream_t cuda_streams[_N_CUDA_STREAMS];
@@ -92,8 +98,6 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
   cudnnDataType_t dtype = CUDNN_DATA_FLOAT;
 
-  size_t total_ws_size = 0;
-
   if ((configs.at(0).H <= 32) && configs.size() <= 40) {
     num_rows_to_compute = 16;
   }
@@ -132,6 +136,9 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
                                               config->dilation_w,
                                               CUDNN_CROSS_CORRELATION,
                                               dtype));
+
+    // checkCUDNN(cudnnSetConvolutionReorderType(descriptors.at(i).conv_desc,
+    //                                           CUDNN_NO_REORDER));
 
     // Initialize tensorDesc, filter_desc and bias_desc
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_desc));
@@ -196,19 +203,26 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
                                                             CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT,
                                                             &returned_algo_count,
                                                             bwd_filter_algo_perf));
-    descriptors.at(i).bwd_filter_algo_best = bwd_filter_algo_perf[0].algo;
-    descriptors.at(i).bwd_filter_algo_best_workspace_size = bwd_filter_algo_perf[0].memory;
+    int best_idx = 0;
+    // for (best_idx = 0; best_idx < CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT; ++best_idx) {
+    //   if (bwd_filter_algo_perf[best_idx].determinism == CUDNN_DETERMINISTIC) {
+    //     break;
+    //   }
+    // }
+
+    descriptors.at(i).bwd_filter_algo_best = bwd_filter_algo_perf[best_idx].algo;
+    descriptors.at(i).bwd_filter_algo_best_workspace_size = bwd_filter_algo_perf[best_idx].memory;
     
-    total_ws_size += bwd_filter_algo_perf[0].memory;
+    total_ws_size += bwd_filter_algo_perf[best_idx].memory;
     descriptors.at(i).grad_weight_per_example_size_in_bytes = (size_t)sizeof(float)\
                                                                 *config->K\
                                                                 *config->C\
                                                                 *config->R\
                                                                 *config->S;
     descriptors.at(i).grad_weight_per_example_size = (size_t)config->K*config->C*config->R*config->S;
-    descriptors.at(i).workspace_size_in_bytes = bwd_filter_algo_perf[0].memory;
-    total_ws_size += bwd_filter_algo_perf[0].memory;
-    partial_per_example_gradient_size += (size_t)config->K*config->C*config->R*config->S;
+    descriptors.at(i).workspace_size_in_bytes = bwd_filter_algo_perf[best_idx].memory;
+    total_ws_size += bwd_filter_algo_perf[best_idx].memory;
+    partial_per_example_gradient_size += (int64_t)config->K*config->C*config->R*config->S;
 
     descriptors.at(i).filter_shape = {config->K, config->C, config->R, config->S};
 
@@ -268,9 +282,16 @@ void set_cudnn_per_batch_algorithm(std::vector<torch::Tensor>& actvs,
                                                             CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT,
                                                             &returned_algo_count,
                                                             bwd_filter_algo_perf));
-    descriptors.at(i).bwd_filter_batch_algo_best = bwd_filter_algo_perf[0].algo;
-    descriptors.at(i).bwd_filter_batch_algo_best_workspace_size = bwd_filter_algo_perf[0].memory;
+    int best_idx = 0;
+    // for (best_idx = 0; best_idx < CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT; ++best_idx) {
+    //   if (bwd_filter_algo_perf[best_idx].determinism == CUDNN_DETERMINISTIC && bwd_filter_algo_perf[best_idx].memory < (size_t)1024*1024*1024*1024) {
+    //     break;
+    //   }
+    // }
 
+    descriptors.at(i).bwd_filter_batch_algo_best = bwd_filter_algo_perf[best_idx].algo;
+    descriptors.at(i).bwd_filter_batch_algo_best_workspace_size = bwd_filter_algo_perf[best_idx].memory;
+    total_per_batch_cudnn_workspace += bwd_filter_algo_perf[best_idx].memory;
   }
 }
 
@@ -458,7 +479,7 @@ void set_cutlass_best_operation(size_t end_cudnn_layer,
   printf("size %lld\n", num_rows_to_compute * partial_per_example_gradient_size);
   auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
   printf("Alloc partial_per_example_gradient\n"); 
-  auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int64_t)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
   printf("partial_per_example_gradient\n");
   // Set CUTLASS device pointers 
   std::vector<void *> wgrads_ptrs;
@@ -502,8 +523,8 @@ void compute_single_per_example_gradient_cudnn(std::vector<Conv2dDescriptor>& de
   using namespace torch::indexing;
 
   // cudnnHandle_t cudnn_handle;
-  int alpha = 1;
-  int beta = 0;
+  float alpha = 1.0;
+  float beta = 0.0;
   for (int row=0; row < num_rows_to_compute; ++row) {
     int offset = 0;
     float * wgrad_ptr = (float *)per_example_gradient.index({row}).data_ptr();
@@ -513,7 +534,9 @@ void compute_single_per_example_gradient_cudnn(std::vector<Conv2dDescriptor>& de
       if (i >= end_cudnn_layer) {
         break;
       }
-
+      torch::cuda::synchronize();
+      printf("%d %d %d %d\n", actvs.at(i).stride((int64_t)0), actvs.at(i).stride((int64_t)1), actvs.at(i).stride((int64_t)2), actvs.at(i).stride((int64_t)3));
+      printf("%d %d %d %d\n", ograds.at(i).stride((int64_t)0), ograds.at(i).stride((int64_t)1), ograds.at(i).stride((int64_t)2), ograds.at(i).stride((int64_t)3));
       if (quant) {
         checkCudaErrors(cutlass_simt_iwgrad((int8_t *)ograds.at(i).data_ptr() + (example_idx + row) * ograds.at(i).numel() / desc.config.N,
                                             (int8_t *)actvs.at(i).data_ptr() + (example_idx + row) * actvs.at(i).numel() / desc.config.N,
@@ -553,10 +576,24 @@ void compute_single_per_example_gradient_cudnn(std::vector<Conv2dDescriptor>& de
                                                   desc.filter_desc,
                                                   wgrad_ptr));
       }
+      torch::cuda::synchronize();
+      checkCudaErrors(cudaDeviceSynchronize());
+      float host_ograds[10];
+      checkCudaErrors(cudaMemcpy((void *)host_ograds,
+                                 (void *)((float *)ograds.at(i).data_ptr() + (example_idx + row) * ograds.at(i).numel() / desc.config.N),
+                                 sizeof(float)*10, cudaMemcpyDeviceToHost));
+      std::cout << "Actvs, " << actvs.at(i).flatten().index({Slice(0, 10)}) << std::endl;
+      std::cout << "Ograds, " << ograds.at(i).flatten().index({Slice(0, 10)}) << std::endl;
+      std::cout << "Ograds2, ";
+      for (int _ = 0; _ < 10; ++_) {printf("%f ", host_ograds[_]);}
+      std::cout << std::endl;
+      std::cout << "After cudnn, " << per_example_gradient.index({row}).flatten().index({Slice(0, 10)}) << std::endl;
 
       wgrad_ptr += desc.grad_weight_per_example_size;
     }
   }
+
+  // std::cout << per_example_gradient.index({0, Slice(0, 64*3*7*7)}) << std::endl;
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -600,6 +637,7 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
   using namespace torch::indexing;
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {1}, false);
+  std::cout << "Norm " << norm << std::endl;
   compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm, num_rows_to_compute);
 }
 
@@ -615,7 +653,7 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
 
   printf("%s\n", cudaGetErrorName(cudaGetLastError()));
   auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int64_t)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   // auto partial_per_example_gradient2 = torch::zeros({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   printf("partial_per_example_gradient\n");
   
@@ -645,15 +683,15 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
   // set_cutlass_best_operation(end_cudnn_layer, batch_count, actvs, ograds, quant, false);
   // auto _ = cutlass_wgrad_grouped::get_best_operation(device_ptr_A, device_ptr_B, device_ptr_C, device_ptr_D);
   for (int example_idx = 0; example_idx < batch_count; example_idx += num_rows_to_compute) {
-    printf("example_idx = %d\n", example_idx);
+    // printf("example_idx = %d\n", example_idx);
     // Compute wgrad of front layers using cuDNN
     compute_single_per_example_gradient_cudnn(descriptors, partial_per_example_gradient, actvs, ograds, end_cudnn_layer, example_idx, quant);
 
-    checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaDeviceSynchronize());
 
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
 
-    checkCudaErrors(cudaDeviceSynchronize());
+    // checkCudaErrors(cudaDeviceSynchronize());
 
     torch::cuda::synchronize();
   }
@@ -688,17 +726,17 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float add_noise_ms = 0.0;
 
   // convert to nchw -> nhwc
-  // for (size_t i = 0; i < actvs.size(); ++i) {
-  //   if (i >= end_cudnn_layer) {
-  //     // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
-  //     actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-  //     ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-  //   }
-  // }
-  // c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
-
-  auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  
+  for (size_t i = 0; i < actvs.size(); ++i) {
+    if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
+      c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+      // actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+    }
+  }
+  c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
+  // printf("1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
+  auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int64_t)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
+  // printf("1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Put precomputed_norm at last to compute norm of total gradient
   // To compute clip and reduce efficiently, gather all precomputed grads into a single tensor
   int64_t gathered_per_example_grads_size = 0;
@@ -737,9 +775,9 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     }
     // checkCudaErrors(cudaDeviceSynchronize());
   }
-
+  // printf("2 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // auto partial_per_example_gradient_decoded = torch::zeros({(int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-  auto per_batch_gradient = torch::zeros({(int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto per_batch_gradient = torch::zeros({(int64_t)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
 
   // Workspace to store scaling factors
   auto scaling_factors = torch::empty({batch_count}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -763,6 +801,9 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
 
     // Compute wgrad of front layers using cuDNN
     LOG_STDERR("Compute wgrad of back layers using CUTLASS", verbose);
+    cudaDeviceSynchronize();
+    std::cout << "before partial_per_example_gradient " << partial_per_example_gradient.index({0, Slice(0, 10)}) << std::endl;
+    cudaDeviceSynchronize();
     // Compute wgrad of back layers using CUTLASS
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
 
@@ -786,6 +827,9 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
     }
 
+    cudaDeviceSynchronize();
+    std::cout << "after partial_per_example_gradient " << partial_per_example_gradient.index({0, Slice(0, 10)}) << std::endl;
+
     TIME_PROFILE(backward_weight_ms, time_profile);
 
     // torch::cuda::synchronize();
@@ -808,8 +852,13 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       auto non_reweight_partial_per_example = partial_per_example_gradient.index({Slice(), Slice(0, (int)non_reweight_per_example_gradient_size)});
       non_reweight_partial_per_example.mul_(scaling_factors.index({Slice(example_idx, example_idx + num_rows_to_compute)}).view({num_rows_to_compute, 1}));
       auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)non_reweight_per_example_gradient_size)});
-      partial_per_batch_gradient.add(non_reweight_partial_per_example.sum({0}));
+      partial_per_batch_gradient.add_(non_reweight_partial_per_example.sum({0}));
+
+      torch::cuda::synchronize();
+      std::cout << "partial_per_batch" << partial_per_batch_gradient.index({Slice(0, 10)}) << std::endl;
+      std::cout << "per_batch" <<  per_batch_gradient.index({Slice(0, 10)}) << std::endl;
     }
+
 
     // for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
     //   checkCudaErrors(cudaEventRecord(events[i], NULL));
@@ -821,7 +870,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     // torch::cuda::synchronize();
     TIME_PROFILE(clip_reduce_ms, time_profile);
   }
-
+  // printf("Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Scale and reduce pre-computed per-example grads
   LOG_STDERR("Scale and reduce pre-computed per-example grads", verbose);
   int64_t per_batch_gradient_from_precomputed_size = 0;
@@ -831,10 +880,13 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     per_batch_gradient_from_precomputed_size += gradient_size / batch_count;
     per_batch_gradient_sizes_from_precomputed.push_back(gradient_size / batch_count);
   }
-  auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads * scaling_factors.view({batch_count, 1}), {0});
+  gathered_per_example_grads.mul_(scaling_factors.view({batch_count, 1}));
+  auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads, {0});
   TIME_PROFILE(clip_reduce_ms, time_profile);
-  per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  add_noise(per_batch_gradient_from_precomputed, max_norm*noise_multiplier);
+  // per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
   TIME_PROFILE(add_noise_ms, time_profile);
+  // printf("Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
 
   std::vector<torch::Tensor> per_batch_grads_from_precomputed;
   {
@@ -886,12 +938,13 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
     }
     else {
-      torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
+      // torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
+      temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
     }
 
     LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);
-    int alpha = 1;
-    int beta = 0;
+    float alpha = 1.0;
+    float beta = 0.0;
 
     // Compute per-batch gradient for rewight layers
     Conv2dDescriptor& descriptor = descriptors.at(i);
@@ -917,7 +970,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                 descriptor.input_batch_desc,
                                                 actvs.at(i).data_ptr(),
                                                 descriptor.output_batch_desc,
-                                                ograds.at(i).data_ptr(),
+                                                temp_ograd.data_ptr(),
                                                 descriptor.conv_desc,
                                                 descriptor.bwd_filter_batch_algo_best,
                                                 descriptor.batch_workspace_ptr,
@@ -935,12 +988,17 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   for (size_t i=0; i < _N_CUDA_STREAMS; ++i) {
     checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
   }
+  cudaDeviceSynchronize();
+  std::cout << "Scaling factors " << scaling_factors << std::endl;
+  std::cout << "After reweight, per_batch" <<  per_batch_grads.at(0).index({Slice(0, 10)}) << std::endl;
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
-  per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  // per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  add_noise(per_batch_gradient, max_norm*noise_multiplier);
   TIME_PROFILE(add_noise_ms, time_profile);
 
   LOG_STDERR("Scale output grads (for linear layer) for reweight", verbose);
+  std::vector<torch::Tensor> scaled_linear_ograds;
   for (size_t i = 0; i < linear_actvs.size(); ++i) {
     std::vector<int64_t> scaling_factors_shape;
     scaling_factors_shape.push_back(scaling_factors.size(0));
@@ -948,7 +1006,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       scaling_factors_shape.push_back(1);
     }
     // torch::mul_out(linear_actvs.at(i), linear_actvs.at(i), scaling_factors.view(scaling_factors_shape));
-    torch::mul_out(linear_ograds.at(i), linear_ograds.at(i), scaling_factors.view(scaling_factors_shape));
+    // torch::mul_out(linear_ograds.at(i), linear_ograds.at(i), scaling_factors.view(scaling_factors_shape));
+    scaled_linear_ograds.push_back(torch::mul(linear_ograds.at(i), scaling_factors.view(scaling_factors_shape)));
   }
 
   std::vector<torch::Tensor> per_batch_linear_grads;
@@ -959,15 +1018,18 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   }
   
   for (size_t i = 0; i < linear_actvs.size(); ++i) {
-    torch::matmul_out(per_batch_linear_grads.at(i), linear_ograds.at(i).transpose(0, 1), linear_actvs.at(i));
+    std::cout << "Linear actvs, " << linear_actvs.at(i).flatten().index({Slice(0, 10)}) << std::endl;
+    std::cout << "Linear ograds, " << linear_ograds.at(i).flatten().index({Slice(0, 10)}) << std::endl;
+    torch::matmul_out(per_batch_linear_grads.at(i), scaled_linear_ograds.at(i).transpose(0, 1), linear_actvs.at(i));
     TIME_PROFILE(clip_reduce_ms, time_profile);
-    per_batch_linear_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    // per_batch_linear_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    add_noise(per_batch_linear_grads.at(i), max_norm*noise_multiplier);
     TIME_PROFILE(add_noise_ms, time_profile);
   }
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
 
-  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, 0);
+  return ReturnType({per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, total_ws_size + total_per_batch_cudnn_workspace);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1022,7 +1084,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     auto min_runtime_us = std::chrono::microseconds(1000000000);
     auto prev_runtime_us = std::chrono::microseconds(1000000000);
     auto increase_count = 0;
-    for (size_t end_cudnn_layer = (quant? 1 : 0); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) {
+    for (size_t end_cudnn_layer = (quant? 1 : configs.size() + 1); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) { // FIXME
       // Initialize cutlass_wgrad_grouped library
       if (quant) {
         cudaDeviceProp deviceProp;
@@ -1047,7 +1109,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       // Set cutlass workspace
       set_cutlass_workspace(end_cudnn_layer, batch_count, quant);
 
-
+      // printf("Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
       LOG_STDERR("Set cutlass best operation", verbose);
       // Set cutlass best operation
       set_cutlass_best_operation(end_cudnn_layer, batch_count, actvs, ograds, quant);
@@ -1066,7 +1128,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       for (int i = 0; i < 10; ++i) {
         benchmark_cudnn_and_cutlass(actvs, ograds, end_cudnn_layer, quant); 
       }
-
+      // printf("Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
       checkCudaErrors(cudaDeviceSynchronize());
       auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -1102,12 +1164,14 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       LOG_STDERR(copyOfStr, true);
     }
 
+    best_end_cudnn_layer = 1; // FIXME
     {
       std::ostringstream stringStream;
       stringStream << "Best end-cudnn-layer = " << best_end_cudnn_layer;
       std::string copyOfStr = stringStream.str();
       LOG_STDERR(copyOfStr, true);
     }
+    set_cudnn_workspace(best_end_cudnn_layer); 
 
     // Initialize cutlass_wgrad_grouped library
     if (quant) {
@@ -1120,7 +1184,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     else {
       cutlass_wgrad_grouped::initialize_float(); 
     }
-
+    // printf("a Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
     // Set cutlass workspace with best end-cudnn-layer
     set_cutlass_workspace(best_end_cudnn_layer, batch_count, quant);
 
@@ -1136,9 +1200,9 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     min_runtime_us = std::chrono::microseconds(1000000000);
     prev_runtime_us = std::chrono::microseconds(1000000000);
     increase_count = 0;
-    
+    // printf("b Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
     // Profile to find best end-non-reweight-layer
-    for (size_t end_non_reweight_layer = 0; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) {
+    for (size_t end_non_reweight_layer = configs.size() + 1; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) { // FIXME
 
       // Compute non-reweight per-example gradient size
       non_reweight_per_example_gradient_size = 0;
@@ -1148,6 +1212,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
         }
       }
       set_per_batch_cudnn_workspace(end_non_reweight_layer);
+      // printf("c Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
 
       // Warm up
       for (int i = 0; i < 1; ++i) {
@@ -1164,7 +1229,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             max_norm,
                                             noise_multiplier,
                                             quant,
-                                            true,
+                                            false,
                                             false,
                                             false); 
       }
@@ -1217,6 +1282,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       LOG_STDERR(copyOfStr, true);
     }
 
+    best_end_non_reweight_layer = 2; // FIXME
     std::ostringstream stringStream;
     stringStream << "Best end-non-reweight-layer = " << best_end_non_reweight_layer;
     std::string copyOfStr = stringStream.str();
@@ -1252,6 +1318,23 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
   }
 
   _first_run = false;
+
+  auto _ = clip_and_reduce_grads_conv(configs,
+                                    actvs,
+                                    ograds,
+                                    precomputed_per_example_grads,
+                                    precomputed_per_example_grad_norms,
+                                    linear_actvs,
+                                    linear_ograds,
+                                    best_end_non_reweight_layer,
+                                    best_end_cudnn_layer,
+                                    batch_count,
+                                    max_norm,
+                                    noise_multiplier,
+                                    quant,
+                                    verbose,
+                                    profile_time,
+                                    profile_memory);
 
   return clip_and_reduce_grads_conv(configs,
                                     actvs,

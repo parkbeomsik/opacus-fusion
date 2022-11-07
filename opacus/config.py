@@ -23,5 +23,9 @@ precomputed_grads = None
 # Profiler
 profile_time = True
 profile_memory = False
+profile_throughput = True
+profile_value = False
+
+grad_save_path = None
 
 warm_up_steps = 0

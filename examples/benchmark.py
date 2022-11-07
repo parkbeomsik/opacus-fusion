@@ -41,6 +41,7 @@ from tqdm import tqdm
 from transformers import BertConfig, BertForSequenceClassification
 from models.deepspeech import DeepSpeech
 from models.gnmt.gnmt import GNMT
+from models.resnet import resnet18, resnet50, resnet152
 
 from opacus.profiler import profiler, total_ignored_time
 from opacus import config
@@ -78,8 +79,8 @@ def pretty_number(n):
 class SampleConvNet(nn.Module):
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv2d(3, 16, 8, 2, padding=3, bias=False)
-        self.conv2 = nn.Conv2d(16, 32, 4, 2, bias=False)
+        self.conv1 = nn.Conv2d(3, 16, 7, 2, padding=3, bias=False)
+        self.conv2 = nn.Conv2d(16, 32, 3, 2, bias=False)
         self.fc1 = nn.Linear(32, 32)
         self.fc2 = nn.Linear(32, 1000)
 
@@ -112,6 +113,9 @@ def print_args(args):
     print(f"Verbose          : {args.verbose}")
 
 def main():  # noqa: C901
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
+
     world_size = 1
 
     args = parse_args()
@@ -127,7 +131,17 @@ def main():  # noqa: C901
 
     config.quantization = args.quant
 
-    config.profile_time = args.profile_time
+    config.profile_value = args.profile_value
+    if config.profile_value:
+        args.warm_up_steps = 0
+        args.steps = 1
+        if (args.model_load_path is None
+            or args.input_load_path is None
+            or args.grad_save_path is None):
+            assert 0, "Config is wrong."
+
+    config.profile_throughput = args.profile_throughput
+    config.profile_time = args.profile_time or args.profile_throughput
     config.profile_memory = args.profile_memory
     config.verbose = args.verbose
 
@@ -135,19 +149,46 @@ def main():  # noqa: C901
     config.architecture = args.architecture
     config.batch_size = args.batch_size
 
+    config.grad_save_path = args.grad_save_path
+
     B = args.batch_size
 
     if args.model_type == "cnn":
-        model = models.__dict__[args.architecture](
-            pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c))
-        )
+        if args.architecture == "sample_conv_net":
+            model = SampleConvNet()
+        elif args.architecture == "resnet18":
+            model = resnet18(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)))
+        elif args.architecture == "resnet50":
+            model = resnet50(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)))
+        elif args.architecture == "resnet152":
+            model = resnet152(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)))
+        else:
+            model = models.__dict__[args.architecture](
+                pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c))
+            )
+
         model = model.to(memory_format=torch.channels_last)
 
-        inputs = torch.randn(B, 3, args.input_size, args.input_size)
+        # Save or load model
+        if args.model_load_path:
+            model.load_state_dict(torch.load(args.model_load_path))
+        if args.model_save_path:
+            torch.save(model.state_dict(), args.model_save_path)
+
+        inputs = torch.randn(1, 3, args.input_size, args.input_size)
         inputs = inputs.to(memory_format=torch.channels_last)
+
+        # Save of load inputs
+        if args.input_load_path:
+            inputs = torch.load(args.input_load_path)
+        if args.input_save_path:
+            torch.save(inputs, args.input_save_path)
+
+        inputs = inputs.expand(B, 3, args.input_size, args.input_size)
         inputs = inputs.expand(
             args.warm_up_steps + args.steps, B, 3, args.input_size, args.input_size
             ).reshape((args.warm_up_steps + args.steps) * B, 3, args.input_size, args.input_size)
+        print(inputs.stride())
         labels = torch.ones(B, dtype=torch.int64).repeat(args.warm_up_steps + args.steps)
         print(inputs.sum())
 
@@ -326,7 +367,12 @@ def main():  # noqa: C901
                 start = time.time()
 
             for tensor_idx, tensor in enumerate(inputs):
-                inputs[tensor_idx] = tensor.cuda(non_blocking=True)
+                if config.model_type == "cnn":
+                    inputs[tensor_idx] = tensor.cuda(non_blocking=True).to(memory_format=torch.channels_last)
+                else:
+                    inputs[tensor_idx] = tensor.cuda(non_blocking=True)
+            
+            print(f"inputs stride : {inputs[0].stride()}")
             profiler.record("Data loading")
 
             # compute output
@@ -341,7 +387,10 @@ def main():  # noqa: C901
             loss.backward()
             profiler.record("Backward activation")
 
-            optimizer.step(input = inputs, criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
+            if args.disable_dp:
+                optimizer.step()
+            else:
+                optimizer.step(input = inputs, criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
             profiler.record("Update")
             profiler.end_step()
 
@@ -375,7 +424,26 @@ def main():  # noqa: C901
 
     print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
     
-    if config.profile_time:
+    if config.profile_throughput:
+        print("")
+        print("==============================================================================================")
+        print("")
+        print("                                     Throughput (#examples/s)")
+        print("")
+        print((args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))))
+
+        throughput = args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))
+
+        if args.log_file != "":
+            if os.path.exists(args.log_file):
+                with open(args.log_file, "a") as f:
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+            else:
+                with open(args.log_file, "w") as f:
+                    f.write("Config,Throughput (#example/s)\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+
+    if config.profile_time and not config.profile_throughput:
         print("==============================================================================================")
         print("")
         print("                                     Time records (ms)")
@@ -413,14 +481,6 @@ def main():  # noqa: C901
                 with open(args.log_file, "w") as f:
                     row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
-
-    # if not config.profile_time and not config.profile_memory:
-    print("")
-    print("==============================================================================================")
-    print("")
-    print("                                     Throughput (#examples/s)")
-    print("")
-    print((args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))))
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Opacus Imagenet Benchmark")
@@ -571,10 +631,24 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--profile_throughput",
+        action="store_true",
+        default=False,
+        help="Profile throughput.",
+    )
+
+    parser.add_argument(
         "--profile_memory",
         action="store_true",
         default=False,
         help="Profile memory.",
+    )
+    
+    parser.add_argument(
+        "--profile_value",
+        action="store_true",
+        default=False,
+        help="Profile value.",
     )
 
     parser.add_argument(
@@ -597,6 +671,26 @@ def parse_args():
 
     parser.add_argument(
         "--log_file", type=str, default="", help="logging file name."
+    )
+
+    parser.add_argument(
+        "--model_load_path", type=str, default=None, help="model path to load."
+    )
+
+    parser.add_argument(
+        "--model_save_path", type=str, default=None, help="model path to save"
+    )
+
+    parser.add_argument(
+        "--input_load_path", type=str, default=None, help="input path to load."
+    )
+
+    parser.add_argument(
+        "--input_save_path", type=str, default=None, help="input path to save"
+    )
+
+    parser.add_argument(
+        "--grad_save_path", type=str, default=None, help="grad path to save"
     )
 
     return parser.parse_args()

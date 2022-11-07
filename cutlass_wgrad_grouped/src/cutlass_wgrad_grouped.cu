@@ -92,13 +92,25 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
                                cudaMemcpyHostToDevice));
 
     // Set problems of operations
+    // Allocate host tensor ref
+    using namespace cutlass::layout;
     using TensorRefIn = cutlass::TensorRef<dType, cutlass::layout::TensorNHWC>;
     using TensorRefOut = cutlass::TensorRef<float, cutlass::layout::TensorNHWC>;
-    std::vector<TensorRefIn> host_ref_A;
-    std::vector<TensorRefIn> host_ref_B;
-    std::vector<TensorRefOut> host_ref_C;
-    std::vector<TensorRefOut> host_ref_D;
+    std::vector<TensorRefIn> host_ref_A(problem_count);
+    std::vector<TensorRefIn> host_ref_B(problem_count);
+    std::vector<TensorRefOut> host_ref_C(problem_count);
+    std::vector<TensorRefOut> host_ref_D(problem_count);
+    // Initialize host tensor refs
+    for (int i = 0; i < problem_count; ++i) {
+        Conv2dConfig conf = host_configs.at(i);
 
+        host_ref_A.at(i).reset(NULL, TensorNHWC(TensorNHWC::packed(cutlass::Tensor4DCoord(conf.N, conf.P, conf.Q, conf.K))));
+        host_ref_B.at(i).reset(NULL, TensorNHWC(TensorNHWC::packed(cutlass::Tensor4DCoord(conf.N, conf.H, conf.W, conf.C))));
+        host_ref_C.at(i).reset(NULL, TensorNHWC(TensorNHWC::packed(cutlass::Tensor4DCoord(conf.K, conf.R, conf.S, conf.C))));
+        host_ref_D.at(i).reset(NULL, TensorNHWC(TensorNHWC::packed(cutlass::Tensor4DCoord(conf.K, conf.R, conf.S, conf.C))));
+    }
+
+    // Allocate device tensor ref
     TensorRefIn *device_ref_A;
     TensorRefIn *device_ref_B;
     TensorRefOut *device_ref_C;
@@ -107,6 +119,13 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     checkCudaErrors(cudaMalloc(&device_ref_B, sizeof(TensorRefIn)*problem_count));
     checkCudaErrors(cudaMalloc(&device_ref_C, sizeof(TensorRefOut)*problem_count));
     checkCudaErrors(cudaMalloc(&device_ref_D, sizeof(TensorRefOut)*problem_count));
+
+    // Copy host refs to device
+    checkCudaErrors(cudaMemcpy(device_ref_A, &host_ref_A[0], sizeof(TensorRefIn)*problem_count, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(device_ref_B, &host_ref_B[0], sizeof(TensorRefIn)*problem_count, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(device_ref_C, &host_ref_C[0], sizeof(TensorRefOut)*problem_count, cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(device_ref_D, &host_ref_D[0], sizeof(TensorRefOut)*problem_count, cudaMemcpyHostToDevice));
+
     for (auto device_workspace : device_workspaces){
         checkCudaErrors(cudaFree(device_workspace));
     }
@@ -137,7 +156,7 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     }
     
     void * device_semaphore;
-    printf("Allocate %d B device workspace\n", max_workspace_size);
+    printf("Allocate %lu B device workspace\n", max_workspace_size);
     checkCudaErrors(cudaMalloc(&device_semaphore, max_workspace_size));
     device_workspaces.push_back(device_semaphore);
 
@@ -150,7 +169,7 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
             return op.operation->initialize(&wgrad_config, device_semaphore, op.host_workspace) != cutlass_wgrad_grouped::Status::kSuccess; }), 
             operations_with_workspaces.end());
 
-    printf("%d operations initialized\n", operations_with_workspaces.size());
+    printf("%lu operations initialized\n", operations_with_workspaces.size());
 
     // assert(operations_with_workspaces.size() == operations.size());
 }
@@ -280,11 +299,11 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
     return best_operation;
 }
 
-Status run(OperationWithWorkspace& operation_with_workspace) {
+Status run(OperationWithWorkspace operation_with_workspace) {
     return operation_with_workspace.operation->run(operation_with_workspace.host_workspace);
 }
 
-Status update_ptrs(OperationWithWorkspace& operation_with_workspace,
+Status update_ptrs(OperationWithWorkspace operation_with_workspace,
                    void ** ptr_A,
                    void ** ptr_B,
                    void ** ptr_C,

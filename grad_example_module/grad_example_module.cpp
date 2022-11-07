@@ -33,7 +33,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                           .def("get_backward_weight_ms", &ReturnType::get_backward_weight_ms)
                                           .def("get_norm_ms", &ReturnType::get_norm_ms)
                                           .def("get_clip_reduce_ms", &ReturnType::get_clip_reduce_ms)
-                                          .def("get_add_noise_ms", &ReturnType::get_add_noise_ms);
+                                          .def("get_add_noise_ms", &ReturnType::get_add_noise_ms)
+                                          .def("get_workspace_size", &ReturnType::get_workspace_size);
   m.def("get_clip_and_reduced_grads_conv", &get_clip_and_reduced_grads_conv, "LLTM forward (CUDA)");
   m.def("get_clip_and_reduced_grads_linear", &get_clip_and_reduced_grads_linear, "LLTM forward (CUDA)");
   m.def("quantize_int8", &quantize_int8, "Quantize Int8 (CUDA)");

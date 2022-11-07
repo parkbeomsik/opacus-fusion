@@ -9,6 +9,8 @@
 #include <string>
 #include <iostream>
 
+#include "cudnn.h"
+
 #define FatalError(s) {                                                \
     std::stringstream _where, _message;                                \
     _where << __FILE__ << ':' << __LINE__;                             \
@@ -42,10 +44,10 @@ int main() {
     using namespace cutlass_wgrad_grouped;
 
     printf("Initialize...\n");
-    cutlass_wgrad_grouped::initialize_int_tensorop();
+    cutlass_wgrad_grouped::initialize_float();
 
+    // Set problems
     std::vector<Conv2dConfig> configs;
-
     configs.push_back({1, 8, 8, 64, 64, 1, 1, 8, 8, 0, 0, 1, 1, 1, 1, 1});
     configs.push_back({1, 8, 8, 64, 64, 3, 3, 8, 8, 1, 1, 1, 1, 1, 1, 1});
     configs.push_back({1, 8, 8, 64, 256, 1, 1, 8, 8, 0, 0, 1, 1, 1, 1, 1});
@@ -144,6 +146,10 @@ int main() {
     checkCudaErrors(cudaDeviceSynchronize());
 
     cutlass_wgrad_grouped::finalize();
+
+
+    // Verify with cuDNN
+
     
     return 0;
 }

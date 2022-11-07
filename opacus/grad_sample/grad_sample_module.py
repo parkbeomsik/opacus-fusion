@@ -37,7 +37,9 @@ from opacus.utils.quant_utils import batch_quantization_encode
 from opacus.profiler import profiler
 from opacus.layers import dp_fast_rnn
 from opacus.layers.dp_fast_rnn import DPFASTLSTM
-from opacus.custom_tensor import GradOutputs
+from opacus.custom_tensor import GradOutputs, PerSampleGrads
+
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -60,13 +62,21 @@ def create_or_accumulate_grad_sample(
         if hasattr(param, "_current_grad_sample"):
             param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
         else:
-            param._current_grad_sample = torch.zeros(
+            # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+            # gc.collect()
+            profiler.record("Backward weight")
+            zero = PerSampleGrads(torch.zeros(
                 torch.Size([max_batch_len]) + grad_sample.shape[1:],
                 device=grad_sample.device,
                 dtype=grad_sample.dtype,
-            )
-            # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
-            param._current_grad_sample = grad_sample
+            ))
+            profiler.record_memory()
+            param._current_grad_sample = zero
+            
+            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            profiler.record("Clip/reduce")
+            
+            # param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
@@ -368,9 +378,11 @@ class GradSampleModule(AbstractGradSampleModule):
             return
 
         profiler.record("Backward activation")
+        # print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
 
         if isinstance(module, DPFASTLSTM):
             backprops = dp_fast_rnn.output_grads
+            backprops = list(map(lambda x: GradOutputs(x), backprops))
             dp_fast_rnn.output_grads = []
         else:
             backprops = GradOutputs(forward_output[0].detach())

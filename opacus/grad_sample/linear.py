@@ -39,6 +39,10 @@ def compute_linear_grad_sample(
         activations: Activations
         backprops: Backpropagations
     """
+    print("Linear actvs")
+    print(activations.flatten()[:10])
+    print("Linear ograds")
+    print(backprops.flatten()[:10])
     backprops = GradOutputs(backprops)
     profiler.record("Backward weight")
 

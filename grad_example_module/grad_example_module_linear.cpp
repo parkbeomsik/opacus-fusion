@@ -19,6 +19,7 @@
 
 #include "utils.h"
 #include "quantize.h"
+#include "add_noise.h"
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -327,16 +328,16 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   for (size_t i=0; i<embedding_actvs.size(); ++i) {
     embedding_gradient_size += embedding_vocab_sizes.at(i) * embedding_ograds.at(i).sizes()[2];
   }
-
+  // printf("1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   auto partial_per_example_gradient = torch::empty({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
-
+  // printf("2 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Put precomputed_norm at last to compute norm of total gradient
   // To compute clip and reduce efficiently, gather all precomputed grads into a single tensor
   int64_t gathered_per_example_grads_size = 0;
   for (size_t i = 0; i < precomputed_per_example_grads.size(); ++i) {
     gathered_per_example_grads_size += precomputed_per_example_grads.at(i).numel() / batch_count;
   }
-  auto gathered_per_example_grads = torch::empty({batch_count, gathered_per_example_grads_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));\
+  auto gathered_per_example_grads = torch::empty({batch_count, gathered_per_example_grads_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   {
     int64_t offset = 0;
     for (size_t i = 0; i < precomputed_per_example_grads.size(); ++i) {
@@ -348,7 +349,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   gathered_per_example_grads.index_put_({Slice(), gathered_per_example_grads_size}, precomputed_per_example_grad_norms.at(0));
   auto precomputed_per_example_norms = torch::frobenius_norm(gathered_per_example_grads, {1});
   gathered_per_example_grads = gathered_per_example_grads.index({Slice(0, batch_count), Slice(0, gathered_per_example_grads_size)});
-
+  // printf("3 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Set CUTLASS device pointers
   std::vector<std::vector<void *>> wgrad_ptrs;
   wgrad_ptrs.resize(Linear::descriptors.size());
@@ -367,10 +368,12 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     set_cublas_device_ptr_array<float>(actvs, ograds, wgrad_ptrs);
   }
   // checkCudaErrors(cudaDeviceSynchronize());
-
+  // printf("4 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
+  // c10::cuda::CUDACachingAllocator::emptyCache();
   // Create tensor to accumulate gradients
   auto per_batch_gradient = torch::zeros({(int64_t)Linear::partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-
+  // c10::cuda::CUDACachingAllocator::emptyCache();
+  // printf("4.1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Workspace to store scaling factors
   auto scaling_factors = torch::empty({batch_count}, torch::TensorOptions().device(torch::kCUDA, 0));
 
@@ -441,11 +444,13 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     per_batch_gradient_from_precomputed_size += gradient_size / batch_count;
     per_batch_gradient_sizes_from_precomputed.push_back(gradient_size / batch_count);
   }
-  auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads * scaling_factors.view({batch_count, 1}), {0});
+  gathered_per_example_grads.mul_(scaling_factors.view({batch_count, 1}));
+  auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads, {0});
   TIME_PROFILE(clip_reduce_ms, time_profile);
-  per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  // per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  add_noise(per_batch_gradient_from_precomputed, max_norm*noise_multiplier);
   TIME_PROFILE(add_noise_ms, time_profile);
-
+  // printf("5 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   std::vector<torch::Tensor> per_batch_grads_from_precomputed;
   {
     int offset = 0;
@@ -477,7 +482,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     }
   }
   assert(per_batch_grads.size() == Linear::descriptors.size());
-
+//  printf("6 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Scale output grads
   LOG_STDERR("Scale output grads for reweight", verbose);
   for (size_t i = 0; i < Linear::descriptors.size(); ++i) {
@@ -533,7 +538,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   }
   at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
   TIME_PROFILE(clip_reduce_ms, time_profile);
-  per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  // per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+  add_noise(per_batch_gradient, max_norm*noise_multiplier);
   TIME_PROFILE(add_noise_ms, time_profile);
 
   std::vector<torch::Tensor> per_batch_linear_last_grads;
@@ -564,7 +570,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       torch::matmul_out(per_batch_linear_last_grads.at(i), linear_last_ograds.at(i).transpose(0, 1), linear_last_actvs.at(i));
     }
     TIME_PROFILE(clip_reduce_ms, time_profile);
-    per_batch_linear_last_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_last_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    // per_batch_linear_last_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_last_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    add_noise(per_batch_linear_last_grads.at(i), max_norm*noise_multiplier);
     TIME_PROFILE(add_noise_ms, time_profile);
   }
 
@@ -601,7 +608,8 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
                                        embedding_vocab_sizes);
   TIME_PROFILE(clip_reduce_ms, time_profile);
   for (size_t i = 0; i < per_batch_embedding_grads.size(); ++i) {
-    per_batch_embedding_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_embedding_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    // per_batch_embedding_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_embedding_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
+    add_noise(per_batch_embedding_grads.at(i), max_norm*noise_multiplier);
     
   }
   TIME_PROFILE(add_noise_ms, time_profile);

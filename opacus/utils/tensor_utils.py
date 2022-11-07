@@ -125,6 +125,7 @@ def unfold2d(
     See :meth:`~torch.nn.functional.unfold`
     """
     *shape, H, W = input.shape
+    N, C = shape
     if padding == "same":
         total_pad_H = dilation[0] * (kernel_size[0] - 1)
         total_pad_W = dilation[1] * (kernel_size[1] - 1)
@@ -156,14 +157,24 @@ def unfold2d(
         + -(kernel_size[1] + (kernel_size[1] - 1) * (dilation[1] - 1))
     ) // stride[1] + 1
     # F.pad's first argument is the padding of the *last* dimension
+    print(input.stride())
     input = F.pad(input, (pad_W_left, pad_W_right, pad_H_left, pad_H_right))
+    print(input.stride())
     *shape_pad, H_pad, W_pad = input.shape
     strides = list(input.stride())
+    # if input.is_contiguous(memory_format=torch.contiguous_format):
+    #     strides = strides[:-2] + [
+    #         W_pad * dilation[0],
+    #         dilation[1],
+    #         W_pad * stride[0],
+    #         stride[1],
+    #     ]
+    # elif input.is_contiguous(memory_format=torch.channels_last):
     strides = strides[:-2] + [
-        W_pad * dilation[0],
-        dilation[1],
-        W_pad * stride[0],
-        stride[1],
+        W_pad * dilation[0] * C,
+        dilation[1] * C,
+        W_pad * stride[0] * C,
+        stride[1] * C,
     ]
     out = input.as_strided(
         shape + [kernel_size[0], kernel_size[1], H_effective, W_effective], strides

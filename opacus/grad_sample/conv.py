@@ -49,6 +49,14 @@ def compute_conv_grad_sample(
         activations: Activations
         backprops: Backpropagations
     """
+    # print(activations)
+    # print(backprops)
+    print("activations")
+    print(activations.stride())
+    print(activations.flatten()[0:10])
+    print("output_grads")
+    print(backprops.stride())
+    print(backprops.flatten()[0:10])
     backprops = GradOutputs(backprops)
     profiler.record("Backward weight")
 
@@ -115,19 +123,48 @@ def compute_conv_grad_sample(
     if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
         if layer.weight.requires_grad_opacus:
             # n=batch_sz; o=num_out_channels; p=(num_in_channels/groups)*kernel_sz
-            grad_sample = PerSampleGrads(contract("noq,npq->nop", backprops, activations, backend="torch"))
+            # print(backprops.shape, activations.shape)
+            # print(layer.groups, layer.kernel_size, layer.in_channels, layer.out_channels)
+            if type(layer) == nn.Conv1d:
+                backprops = backprops.view(n, layer.groups, -1, backprops.shape[2])
+                activations = activations.view(n, layer.groups, -1, activations.shape[2])
+                grad_sample = PerSampleGrads(contract("ngoq,ngpq->ngop", backprops, activations, backend="torch"))
+                backprops = backprops.view(n, -1, backprops.shape[3])
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(contract("noq,npq->nop", backprops, activations, backend="torch"))
+            # print(grad_sample.shape)
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
             # grad_sample = PerSampleGrads(torch.einsum("noq,npq->nop", backprops, activations))
             del activations
             # rearrange the above tensor and extract diagonals.
-            grad_sample = PerSampleGrads(grad_sample.view(
-                n,
-                layer.groups,
-                -1,
-                layer.groups,
-                int(layer.in_channels / layer.groups),
-                np.prod(layer.kernel_size),
-            ))
-            grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
+            if type(layer) == nn.Conv1d:
+                grad_sample = PerSampleGrads(grad_sample.view(
+                    n,
+                    layer.groups,
+                    -1,
+                    # layer.groups,
+                    int(layer.in_channels / layer.groups),
+                    np.prod(layer.kernel_size),
+                ))
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(grad_sample.view(
+                    n,
+                    layer.groups,
+                    -1,
+                    layer.groups,
+                    int(layer.in_channels / layer.groups),
+                    np.prod(layer.kernel_size),
+                ))
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
+            if type(layer) == nn.Conv1d:
+                grad_sample = PerSampleGrads(grad_sample.contiguous())
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
+                
+                print("per_example_grads")
+                print(grad_sample.permute(0, 1, 4, 2, 3).flatten()[0:10])
+            # print(grad_sample.shape, layer.weight.shape)
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
             # grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())
             # profiler.record("Backward weight")
 

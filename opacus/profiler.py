@@ -60,7 +60,7 @@ class Profiler():
         self.start_interval_time = time.time()
         self.ignore_time = 0
         self.time_keys = ["Total", "Data loading", "Forward", "Backward activation", "Backward weight", "Clip/reduce", "Add noise", "Update"]
-        self.memory_keys = ["Peak memory usage", "Weights", "Input activations", "Activation gradients", "Per-batch weight gradients", "Per-example weight gradients"]
+        self.memory_keys = ["Peak memory usage", "Weights", "Input activations", "Activation gradients", "Per-batch weight gradients", "Per-example weight gradients", "Workspace"]
         self.peak_memory_usage = 0
         self.step_count = 0
 
@@ -91,6 +91,9 @@ class Profiler():
         self.time_records[type] += time_elapsed
         torch.cuda.synchronize()
         self.start_interval_time = time.time()
+
+    def add_memory_explicit(self, key="", size=0):
+        self.memory_records[key] = size
 
     def record_memory(self, type="", input_activation=False):
         if config.profile_memory:

@@ -131,7 +131,7 @@ protected:
     Operator *op = (Operator *)host_workspace;
 
     // Generate epilouge op
-    typename Operator::EpilogueOutputOp::Params epilogue_op(1.0, 0.0);
+    typename Operator::EpilogueOutputOp::Params epilogue_op(1.0f, 0.0f);
 
     // Get device's multi processor count
     cudaDeviceProp properties;
