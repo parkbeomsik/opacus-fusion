@@ -89,11 +89,11 @@ class BasicBlock(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         identity = x
 
-        out = self.conv1(x)
+        out = self.conv1(x).to(memory_format=torch.contiguous_format)
         out = self.bn1(out).to(memory_format=torch.channels_last)
         out = self.relu(out)
 
-        out = self.conv2(out)
+        out = self.conv2(out).to(memory_format=torch.contiguous_format)
         out = self.bn2(out).to(memory_format=torch.channels_last)
 
         if self.downsample is not None:
@@ -143,15 +143,15 @@ class Bottleneck(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         identity = x
 
-        out = self.conv1(x)
+        out = self.conv1(x).to(memory_format=torch.contiguous_format)
         out = self.bn1(out).to(memory_format=torch.channels_last)
         out = self.relu(out)
 
-        out = self.conv2(out)
+        out = self.conv2(out).to(memory_format=torch.contiguous_format)
         out = self.bn2(out).to(memory_format=torch.channels_last)
         out = self.relu(out)
 
-        out = self.conv3(out)
+        out = self.conv3(out).to(memory_format=torch.contiguous_format)
         out = self.bn3(out).to(memory_format=torch.channels_last)
 
         if self.downsample is not None:
@@ -162,6 +162,25 @@ class Bottleneck(nn.Module):
 
         return out
 
+class Downsample(nn.Module):
+    def __init__(
+        self,
+        inplanes: int,
+        planes: int,
+        expansion: int,
+        stride: int,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        self.conv = conv1x1(inplanes, planes * expansion, stride)
+        self.norm_layer = norm_layer(planes * expansion)
+
+    def forward(self, x: Tensor) -> Tensor:
+        x = self.conv(x).to(memory_format=torch.contiguous_format)
+
+        return self.norm_layer(x).to(memory_format=torch.channels_last)
 
 class ResNet(nn.Module):
     def __init__(
@@ -237,10 +256,11 @@ class ResNet(nn.Module):
             self.dilation *= stride
             stride = 1
         if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                conv1x1(self.inplanes, planes * block.expansion, stride),
-                norm_layer(planes * block.expansion),
-            )
+            downsample = Downsample(self.inplanes, planes, block.expansion, stride, norm_layer)
+            # downsample = nn.Sequential(
+            #     conv1x1(self.inplanes, planes * block.expansion, stride),
+            #     norm_layer(planes * block.expansion),
+            # )
 
         layers = []
         layers.append(
@@ -265,7 +285,7 @@ class ResNet(nn.Module):
 
     def _forward_impl(self, x: Tensor) -> Tensor:
         # See note [TorchScript super()]
-        x = self.conv1(x)
+        x = self.conv1(x).to(memory_format=torch.contiguous_format)
         x = self.bn1(x).to(memory_format=torch.channels_last)
         x = self.relu(x)
         x = self.maxpool(x)
