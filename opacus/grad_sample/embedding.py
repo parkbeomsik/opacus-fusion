@@ -20,6 +20,11 @@ import torch.nn as nn
 
 from .utils import register_grad_sampler
 
+from opacus import config
+from opacus.config import MODE_ELEGANT, MODE_NAIVE, MODE_REWEIGHT
+from opacus.custom_tensor import GradOutputs, PerSampleGrads
+from opacus.profiler import profiler
+from opacus.utils.quant_utils import batch_quantization_encode
 
 @register_grad_sampler(nn.Embedding)
 def compute_embedding_grad_sample(
@@ -32,24 +37,43 @@ def compute_embedding_grad_sample(
         layer: Layer
         activations: Activations
         backprops: Backpropagations
-    """
-    ret = {}
-    if layer.weight.requires_grad:
-        saved = torch.backends.cudnn.deterministic
-        torch.backends.cudnn.deterministic = True
+    """    
+    if config.dpsgd_mode == MODE_ELEGANT:
+        # if config.quantization:
+        #     m, scale = batch_quantization_encode(backprops, bit=8)
+        #     layer.grad_outputs = [GradOutputs(m)]
+        #     layer.grad_outputs_scale = scale
+        # else:
+        layer.grad_outputs = [GradOutputs(backprops)]
+        layer.activations = [activations]
 
-        batch_size = activations.shape[0]
-        index = (
-            activations.unsqueeze(-1)
-            .expand(*activations.shape, layer.embedding_dim)
-            .reshape(batch_size, -1, layer.embedding_dim)
-        )
-        grad_sample = torch.zeros(
-            batch_size, *layer.weight.shape, device=layer.weight.device
-        )
-        grad_sample.scatter_add_(
-            1, index, backprops.reshape(batch_size, -1, layer.embedding_dim)
-        )
-        torch.backends.cudnn.deterministic = saved
-        ret[layer.weight] = grad_sample
+    ret = {}
+    if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+        if layer.weight.requires_grad_opacus:
+            saved = torch.backends.cudnn.deterministic
+            torch.backends.cudnn.deterministic = True
+
+            batch_size = activations.shape[0]
+            index = (
+                activations.unsqueeze(-1)
+                .expand(*activations.shape, layer.embedding_dim)
+                .reshape(batch_size, -1, layer.embedding_dim)
+            )
+            grad_sample = torch.zeros(
+                batch_size, *layer.weight.shape, device=layer.weight.device
+            )
+            grad_sample.scatter_add_(
+                1, index, backprops.reshape(batch_size, -1, layer.embedding_dim)
+            )
+            grad_sample = PerSampleGrads(grad_sample)
+            torch.backends.cudnn.deterministic = saved
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+                ret[layer.weight] = grad_sample
+
+            profiler.record("Backward weight")
+
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     layer.weight.grad_sample_norms = [grad_sample.norm(2, dim=(1, 2))]
+            #     profiler.record("Clip/reduce")
+
     return ret

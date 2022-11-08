@@ -48,11 +48,18 @@ def trainable_modules(module: nn.Module) -> Iterable[Tuple[str, nn.Module]]:
     Recursively iterates over all submodules, returning those that
     have parameters and are trainable (ie they want a grad).
     """
-    yield from (
-        (m_name, m)
-        for (m_name, m) in parametrized_modules(module)
-        if any(p.requires_grad for p in m.parameters(recurse=False))
-    )
+    if hasattr(module, "hooks_enabled") and module.hooks_enabled:
+        yield from (
+            (m_name, m)
+            for (m_name, m) in parametrized_modules(module)
+            if any(p.requires_grad_opacus for p in m.parameters(recurse=False))
+        )
+    else:
+        yield from (
+            (m_name, m)
+            for (m_name, m) in parametrized_modules(module)
+            if any(p.requires_grad for p in m.parameters(recurse=False))
+        )
 
 
 def trainable_parameters(module: nn.Module) -> Iterable[Tuple[str, nn.Parameter]]:
@@ -61,7 +68,7 @@ def trainable_parameters(module: nn.Module) -> Iterable[Tuple[str, nn.Parameter]
     are trainable (ie they want a grad).
     """
     yield from (
-        (p_name, p) for (p_name, p) in module.named_parameters() if p.requires_grad
+        (p_name, p) for (p_name, p) in module.named_parameters() if p.requires_grad or (hasattr(p, "requires_grad_opacus") and p.requires_grad_opacus)
     )
 
 
@@ -77,7 +84,7 @@ def requires_grad(module: nn.Module, *, recurse: bool = False) -> bool:
     Returns:
         Flag indicate if any parameters require gradients
     """
-    requires_grad = any(p.requires_grad for p in module.parameters(recurse))
+    requires_grad = any(p.requires_grad_opacus for p in module.parameters(recurse))
     return requires_grad
 
 

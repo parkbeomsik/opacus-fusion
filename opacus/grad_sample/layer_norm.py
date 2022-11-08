@@ -20,9 +20,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from opacus.utils.tensor_utils import sum_over_all_but_batch_and_last_n
+from opt_einsum import contract
 
 from .utils import register_grad_sampler
 
+from opacus import config
+from opacus.config import MODE_ELEGANT, MODE_NAIVE, MODE_REWEIGHT
+from opacus.custom_tensor import GradOutputs, PerSampleGrads
+from opacus.profiler import profiler
 
 @register_grad_sampler(nn.LayerNorm)
 def compute_layer_norm_grad_sample(
@@ -38,13 +43,21 @@ def compute_layer_norm_grad_sample(
         activations: Activations
         backprops: Backpropagations
     """
+    backprops = GradOutputs(backprops)
+    profiler.record("Backward weight")
+
     ret = {}
-    if layer.weight.requires_grad:
-        ret[layer.weight] = sum_over_all_but_batch_and_last_n(
+    if layer.weight.requires_grad_opacus:
+        gs = sum_over_all_but_batch_and_last_n(
             F.layer_norm(activations, layer.normalized_shape, eps=layer.eps)
             * backprops,
             layer.weight.dim(),
         )
-    if layer.bias.requires_grad:
-        ret[layer.bias] = sum_over_all_but_batch_and_last_n(backprops, layer.bias.dim())
+        profiler.record("Backward weight")
+        ret[layer.weight] = PerSampleGrads(gs)
+
+    if layer.bias.requires_grad_opacus:
+        ret[layer.bias] = PerSampleGrads(sum_over_all_but_batch_and_last_n(backprops, layer.bias.dim()))
+        profiler.record("Backward weight")
+
     return ret

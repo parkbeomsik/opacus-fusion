@@ -147,6 +147,7 @@ class PrivacyEngine:
     def _prepare_optimizer(
         self,
         optimizer: optim.Optimizer,
+        module: AbstractGradSampleModule,
         *,
         noise_multiplier: float,
         max_grad_norm: Union[float, List[float]],
@@ -174,6 +175,7 @@ class PrivacyEngine:
 
         return optim_class(
             optimizer=optimizer,
+            module=module,
             noise_multiplier=noise_multiplier,
             max_grad_norm=max_grad_norm,
             expected_batch_size=expected_batch_size,
@@ -418,6 +420,7 @@ class PrivacyEngine:
 
         optimizer = self._prepare_optimizer(
             optimizer,
+            module,
             noise_multiplier=noise_multiplier,
             max_grad_norm=max_grad_norm,
             expected_batch_size=expected_batch_size,
@@ -443,11 +446,13 @@ class PrivacyEngine:
         target_epsilon: float,
         target_delta: float,
         epochs: int,
-        max_grad_norm: float,
+        max_grad_norm: Union[float, List[float]],
         batch_first: bool = True,
         loss_reduction: str = "mean",
+        poisson_sampling: bool = True,
+        clipping: str = "flat",
         noise_generator=None,
-        grad_sample_mode="hooks",
+        grad_sample_mode: str = "hooks",
         **kwargs,
     ):
         """
@@ -522,6 +527,8 @@ class PrivacyEngine:
             loss_reduction=loss_reduction,
             noise_generator=noise_generator,
             grad_sample_mode=grad_sample_mode,
+            poisson_sampling=poisson_sampling,
+            clipping=clipping,
         )
 
     def get_epsilon(self, delta):

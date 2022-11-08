@@ -1,5 +1,7 @@
 functorch
 numpy>=1.15
-torch>=1.8
+# torch>=1.8
 scipy>=1.2
 opt-einsum>=3.3.0
+transformers
+pandas

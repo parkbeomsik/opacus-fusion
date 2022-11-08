@@ -13,15 +13,27 @@
 # limitations under the License.
 
 from __future__ import annotations
+from collections import defaultdict
 
 import logging
 from typing import Callable, List, Optional, Union
+import time
 
 import torch
 from opacus.optimizers.utils import params
+from opacus import config
+from opacus.config import MODE_NAIVE, MODE_REWEIGHT, MODE_ELEGANT
+from opacus.custom_tensor import PerBatchGrads
+from opacus.grad_sample import AbstractGradSampleModule, GradSampleModule
+from opacus.utils.module_utils import trainable_modules
 from opt_einsum.contract import contract
 from torch import nn
 from torch.optim import Optimizer
+
+import grad_example_module
+
+from opacus.profiler import profiler, total_ignored_time
+from opacus.layers.dp_fast_rnn import DPFASTLSTM
 
 
 logger = logging.getLogger(__name__)
@@ -197,6 +209,7 @@ class DPOptimizer(Optimizer):
     def __init__(
         self,
         optimizer: Optimizer,
+        module: GradSampleModule,
         *,
         noise_multiplier: float,
         max_grad_norm: float,
@@ -248,6 +261,9 @@ class DPOptimizer(Optimizer):
 
         for p in self.params:
             p.summed_grad = None
+
+        self.first_run = True
+        self.module = module
 
     def _get_flat_grad_sample(self, p: torch.Tensor):
         """
@@ -356,6 +372,9 @@ class DPOptimizer(Optimizer):
 
         Used by privacy accountants to calculate real sampling rate.
         """
+        if config.dpsgd_mode == MODE_REWEIGHT or config.dpsgd_mode == MODE_ELEGANT:
+            return 1
+        
         vals = []
         for p in self.params:
             if not hasattr(p, "grad_sample"):
@@ -388,31 +407,786 @@ class DPOptimizer(Optimizer):
 
         self.step_hook = fn
 
-    def clip_and_accumulate(self):
+    def clip_and_accumulate(self, **kwargs):
         """
         Performs gradient clipping.
         Stores clipped and aggregated gradients into `p.summed_grad```
         """
 
-        per_param_norms = [
-            g.reshape(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
-        ]
-        per_sample_norms = torch.stack(per_param_norms, dim=1).norm(2, dim=1)
-        per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
-            max=1.0
-        )
+        if config.dpsgd_mode == MODE_NAIVE:
+            profiler.record_memory()
 
-        for p in self.params:
-            _check_processed_flag(p.grad_sample)
-            grad_sample = self._get_flat_grad_sample(p)
-            grad = contract("i,i...", per_sample_clip_factor, grad_sample)
+            per_param_norms = [
+                g.reshape(len(g), -1).norm(2, dim=-1) for g in self.grad_samples
+            ]
+            per_sample_norms = torch.stack(per_param_norms, dim=1).norm(2, dim=1)
+            per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
+                max=1.0
+            )
+            # print("per_sample_norms")
+            # print(per_sample_norms)
+            # print("scaling_factors")
+            # print(per_sample_clip_factor*100)
 
-            if p.summed_grad is not None:
-                p.summed_grad += grad
-            else:
-                p.summed_grad = grad
+            for p in self.params:
+                _check_processed_flag(p.grad_sample)
+                grad_sample = self._get_flat_grad_sample(p)
+                grad = torch.einsum("i,i...", per_sample_clip_factor, grad_sample)
+                # grad = contract("i,i...", per_sample_clip_factor, grad_sample, backend="torch")
+                # batch_size = grad_sample.shape[0]
+                # grad = torch.sum(per_sample_clip_factor.view(batch_size, *list(1 for _ in range(1, len(grad_sample.shape)))) * grad_sample, dim=0)
 
-            _mark_as_processed(p.grad_sample)
+                if p.summed_grad is not None:
+                    p.summed_grad += PerBatchGrads(grad)
+                else:
+                    p.summed_grad = PerBatchGrads(grad)
+
+                _mark_as_processed(p.grad_sample)
+
+            profiler.record_memory()
+
+        elif config.dpsgd_mode == MODE_REWEIGHT:
+            # Collect gradient norms from all layers
+            per_param_norms = []
+            for name, layer in trainable_modules(self.module):
+                if type(layer) == DPFASTLSTM:
+                    if layer.weight_ih.requires_grad_opacus:
+                        per_param_norms += layer.weight_ih.grad_sample_norms
+                    if layer.weight_hh.requires_grad_opacus:
+                        per_param_norms += layer.weight_hh.grad_sample_norms
+                    if layer.bidirectional:
+                        if layer.weight_ih_reverse.requires_grad_opacus:
+                            per_param_norms += layer.weight_ih_reverse.grad_sample_norms
+                        if layer.weight_hh_reverse.requires_grad_opacus:
+                            per_param_norms += layer.weight_hh_reverse.grad_sample_norms
+                else:
+                    if layer.weight.requires_grad_opacus:
+                        per_param_norms += layer.weight.grad_sample_norms
+                if (hasattr(layer, "bias") 
+                    and layer.bias is not None 
+                    and layer.bias.requires_grad_opacus):
+                    per_param_norms += layer.bias.grad_sample_norms
+                    if type(layer) == DPFASTLSTM and layer.bidirectional and layer.bias_reverse.requires_grad_opacus:
+                        per_param_norms += layer.bias_reverse.grad_sample_norms
+
+            # Compute scaling factors
+            per_sample_norms = torch.stack(per_param_norms, dim=1).norm(2, dim=1)
+            per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
+                max=1.0
+            )
+
+            input = kwargs["input"]
+            criterion = kwargs["criterion"]
+            target = kwargs["target"]
+            self.module.disable_hooks()
+
+            # PyTorch can't turn-on require_grad for only second backpropagation
+            # So, we will do forward propagation again to set require_grad on
+            profiler.record("Clip/reduce")
+
+            # This can be removed using better implementation
+            # So, we will ignore time for this second propagation
+            # torch.cuda.synchronize()
+            # start = time.time()
+
+            if config.model_type == "cnn" or config.model_type == "rnn":
+                output = self.module(*input)
+            if config.model_type == "transformer":
+                output = self.module(*input, return_dict=False)[0]
+
+            loss = criterion(output, target)
+            loss = (loss * per_sample_clip_factor).mean()
+
+            # profiler.reset_time()
+            torch.cuda.synchronize()
+            # total_ignored_time.append(time.time() - start)
+
+            ## Second backpropagation (get per-batch gradient)
+            loss.backward()
+
+            self.module.enable_hooks()
+
+            for p in self.params:
+                p.summed_grad = PerBatchGrads(p.grad)
+                p.grad = None
+
+            profiler.record("Clip/reduce")
+
+        elif config.dpsgd_mode == MODE_ELEGANT:
+            if config.model_type == "cnn":
+                if self.first_run:
+                    # Set Conv2d configs
+                    self.configs = []
+                    i = 0
+                    for name, layer in trainable_modules(self.module):
+                        if isinstance(layer, nn.Conv2d):
+                            input_H = layer.activations[0].shape[2]
+                            input_W = layer.activations[0].shape[3]
+                            break
+
+                    # print(input_H, input_W)
+
+                    if input_H * input_W < 32*32 + 1:
+                        split_k_size = 1024
+                    else:
+                        split_k_size = 224*224+1 # 112*112 + 1
+
+                    for name, layer in trainable_modules(self.module):
+                        if isinstance(layer, nn.Conv2d):
+                            self.batch_size = layer.activations[0].shape[0]
+                            N = layer.activations[0].shape[0]
+                            H = layer.activations[0].shape[2]
+                            W = layer.activations[0].shape[3]
+                            C = layer.activations[0].shape[1]
+                            K = layer.grad_outputs[0].shape[1]
+                            R = layer.kernel_size[0]
+                            S = layer.kernel_size[1]
+                            P = layer.grad_outputs[0].shape[2]
+                            Q = layer.grad_outputs[0].shape[3]
+                            pad_h, pad_w = layer.padding
+                            stride_h, stride_w = layer.stride
+                            dilation_h, dilation_w = layer.dilation
+                            # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
+                            self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
+                                                                                pad_h, pad_w, stride_h, stride_w,
+                                                                                dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
+                            # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
+                            # print(f"{i} {'x'.join(args)}")
+                            # i += 1
+
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.conv_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Conv2d):
+                            self.conv_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            self.linear_list.append(layer)
+
+                    self.group_norm_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.GroupNorm):
+                            self.group_norm_list.append(layer)             
+
+                    self.first_run = False
+
+                # Collect activations and grad_outputs, precomputed_grads
+                activations = []
+                grad_outputs = []
+                linear_activations = []
+                linear_grad_outputs = []
+                linear_norms = []
+                precomputed_grads = []
+                precomputed_norms = []
+
+                for layer in self.conv_list:
+                    activations.append(layer.activations[0])
+                    grad_outputs.append(layer.grad_outputs[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)   
+                
+                for layer in self.linear_list:
+                    linear_activations.append(layer.activations[0])
+                    linear_grad_outputs.append(layer.grad_outputs[0])
+                    linear_norms.append(layer.weight.grad_sample_norms[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+                
+                for layer in self.group_norm_list:
+                    precomputed_grads.append(layer.weight.grad_sample)
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                precomputed_norms = [torch.stack(linear_norms, dim=1).norm(2, dim=1)]
+                
+                profiler.record("Clip/reduce")
+                # print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
+                # Compute accumulated per-batch gradient and scaling_factors
+                result_grad_example_module = \
+                    grad_example_module.get_clip_and_reduced_grads_conv(self.configs, activations, grad_outputs,
+                                                                precomputed_grads, precomputed_norms,
+                                                                linear_activations, linear_grad_outputs,
+                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier,
+                                                                config.quantization, 
+                                                                config.verbose, config.profile_time, config.profile_memory)
+
+                # torch.cuda.synchronize()
+                profiler.start_interval_time = time.time()
+                profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
+                profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
+                profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+                profiler.add_memory_explicit("Workspace", result_grad_example_module.get_workspace_size())
+                # print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
+
+                per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
+
+                # Set per-batch grads of key GEMM layers
+                conv_idx = 0
+                linear_idx = 0
+                precomputed_idx = 0
+                
+                for layer in self.conv_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads[conv_idx])
+                    conv_idx += 1
+
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    layer.activations = []
+                    layer.grad_outputs = []
+
+                for layer in self.linear_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_linear_grads[linear_idx])
+                    linear_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
+
+                for layer in self.group_norm_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    precomputed_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    layer.activations = []
+
+            if config.model_type == "transformer":
+                if self.first_run:
+                    # Set Linear configs
+                    self.configs = []
+                    self.gemm_key_order = []
+                    num_layers_dict = defaultdict(int)
+                    for name, layer in trainable_modules(self.module):
+                        if isinstance(layer, nn.Linear) and len(layer.activations[0].shape) > 2:
+                            self.batch_size = layer.activations[0].shape[0]
+                            N = layer.activations[0].shape[0]
+                            seq_len = layer.activations[0].shape[1]
+                            in_features = layer.activations[0].shape[2]
+                            out_features = layer.grad_outputs[0].shape[2]
+                            self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                            num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                    self.gemm_key_order = list(set(self.gemm_key_order))
+                    self.gemm_key_order = sorted(self.gemm_key_order, key=lambda x: x[2]*x[3])
+
+                    for k in self.gemm_key_order:
+                        self.configs.append(grad_example_module.LinearConfig(k[0], k[1], k[2], k[3],
+                                                                             num_layers_dict[k]))
+
+                    self.start_key_gemm_idx = [0 for _ in range(len(self.gemm_key_order))]
+                    for i in range(len(self.gemm_key_order)):
+                        for j in range(len(self.gemm_key_order)):
+                            if j < i:
+                                self.start_key_gemm_idx[i] += num_layers_dict[self.gemm_key_order[j]]
+
+                    self.first_run = False
+
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.embedding_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Embedding):
+                            self.embedding_list.append(layer)
+
+                    self.linear_last_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            if len(layer.activations[0].shape) == 2:
+                                self.linear_last_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            if len(layer.activations[0].shape) > 2:
+                                self.linear_list.append(layer)                    
+
+                    self.layer_norm_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.LayerNorm):
+                            self.layer_norm_list.append(layer)
+
+                # Collect activations and grad_outputs, precomputed_grads
+                activations = [[] for _ in range(len(self.gemm_key_order))]
+                grad_outputs = [[] for _ in range(len(self.gemm_key_order))]
+                linear_last_activations = []
+                linear_last_grad_outputs = []
+                linear_last_norms = []
+                embedding_activations = []
+                embedding_grad_outputs = []
+                embedding_vocab_sizes = []
+                precomputed_grads = []
+                precomputed_norms = []
+
+                for layer in self.embedding_list:
+                    embedding_activations.append(layer.activations[0])
+                    embedding_grad_outputs.append(layer.grad_outputs[0])
+                    embedding_vocab_sizes.append(layer.weight.shape[0])
+
+                for layer in self.linear_last_list:
+                    linear_last_activations.append(layer.activations[0])
+                    linear_last_grad_outputs.append(layer.grad_outputs[0])
+                    linear_last_norms.append(layer.weight.grad_sample_norms[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                for layer in self.layer_norm_list:
+                    precomputed_grads.append(layer.weight.grad_sample)
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                for layer in self.linear_list:
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    activations[config_idx].append(layer.activations[0])
+                    grad_outputs[config_idx].append(layer.grad_outputs[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                # precomputed_norms = [torch.stack(precomputed_norms + linear_last_norms, dim=1).norm(2, dim=1)]
+                precomputed_norms = [torch.stack(linear_last_norms, dim=1).norm(2, dim=1)]
+                
+                profiler.record("Clip/reduce")
+
+                # Compute accumulated per-batch gradient and scaling_factors
+                result_grad_example_module = \
+                    grad_example_module.get_clip_and_reduced_grads_linear(self.configs, activations, grad_outputs,
+                                                                precomputed_grads, precomputed_norms,
+                                                                linear_last_activations, linear_last_grad_outputs,
+                                                                embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier,
+                                                                config.quantization, 
+                                                                config.verbose, config.profile_time, config.profile_memory)
+                # print(f"Start Python {time.time_ns()}")
+                start = time.time()
+
+                # torch.cuda.synchronize()
+                profiler.start_interval_time = time.time()
+                profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
+                profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
+                profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+
+                per_batch_grads, \
+                per_batch_grads_from_precomputed, \
+                per_batch_linear_last_grads, \
+                per_batch_embedding_grads = result_grad_example_module.get_per_batch_grads()
+
+                # Set per-batch grads of key GEMM layers
+                key_gemm_idx = self.start_key_gemm_idx.copy()
+                precomputed_idx = 0
+                last_linear_idx = 0
+                embedding_idx = 0
+
+                for layer in self.embedding_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_embedding_grads[embedding_idx])
+                    embedding_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+
+                for layer in self.linear_last_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_linear_last_grads[last_linear_idx])
+                    last_linear_idx += 1
+
+                    # Set per-batch grads of pre-computed layers
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
+
+                for layer in self.layer_norm_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    precomputed_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+
+                for layer in self.linear_list:
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    key_gemm_idx[gemm_idx] += 1
+
+                    # Set per-batch grads of pre-computed layers
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
+
+                # print(f"{(time.time() - start) * 1000}")
+
+            if config.model_type == "rnn":
+                if self.first_run:
+                    # Set Linear configs
+                    self.configs = []
+                    self.gemm_key_order = []
+                    num_layers_dict = defaultdict(int)
+                    for name, layer in trainable_modules(self.module):
+                        if isinstance(layer, nn.Linear) and len(layer.activations[0].shape) > 2:
+                            self.batch_size = layer.activations[0].shape[0]
+                            N = layer.activations[0].shape[0]
+                            seq_len = layer.activations[0].shape[1]
+                            in_features = layer.activations[0].shape[2]
+                            out_features = layer.grad_outputs[0].shape[2]
+                            self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                            num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                        if isinstance(layer, DPFASTLSTM):
+                            # weight_ih
+                            self.batch_size = layer.activations[0].shape[0]
+                            N = layer.activations[0].shape[0]
+                            seq_len = layer.activations[0].shape[1]
+                            in_features = layer.activations[0].shape[2]
+                            out_features = layer.grad_outputs[0].shape[2]
+                            self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                            num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                            # weight_hh
+                            self.batch_size = layer.activations[1].shape[0]
+                            N = layer.activations[1].shape[0]
+                            seq_len = layer.activations[1].shape[1]
+                            in_features = layer.activations[1].shape[2]
+                            out_features = layer.grad_outputs[0].shape[2]
+                            self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                            num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                            if layer.bidirectional:
+                                # weight_ih
+                                self.batch_size = layer.activations[0].shape[0]
+                                N = layer.activations[0].shape[0]
+                                seq_len = layer.activations[0].shape[1]
+                                in_features = layer.activations[0].shape[2]
+                                out_features = layer.grad_outputs[1].shape[2]
+                                self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                                num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                                # weight_hh
+                                self.batch_size = layer.activations[2].shape[0]
+                                N = layer.activations[2].shape[0]
+                                seq_len = layer.activations[2].shape[1]
+                                in_features = layer.activations[2].shape[2]
+                                out_features = layer.grad_outputs[1].shape[2]
+                                self.gemm_key_order.append((N, seq_len, in_features, out_features))
+                                num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                    self.gemm_key_order = list(set(self.gemm_key_order))
+                    self.gemm_key_order = sorted(self.gemm_key_order, key=lambda x: (-100000) * x[1] + x[2]*x[3])
+
+                    for k in self.gemm_key_order:
+                        self.configs.append(grad_example_module.LinearConfig(k[0], k[1], k[2], k[3],
+                                                                             num_layers_dict[k]))
+
+                    self.start_key_gemm_idx = [0 for _ in range(len(self.gemm_key_order))]
+                    for i in range(len(self.gemm_key_order)):
+                        for j in range(len(self.gemm_key_order)):
+                            if j < i:
+                                self.start_key_gemm_idx[i] += num_layers_dict[self.gemm_key_order[j]]
+
+                    self.first_run = False
+
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.embedding_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Embedding):
+                            self.embedding_list.append(layer)
+
+                    self.linear_last_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            if len(layer.activations[0].shape) == 2:
+                                self.linear_last_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            if len(layer.activations[0].shape) > 2:
+                                self.linear_list.append(layer)                
+
+                    self.rnn_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, DPFASTLSTM):   
+                            self.rnn_list.append(layer) 
+
+                    self.pre_computed_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.GroupNorm) or isinstance(layer, nn.Conv2d) or isinstance(layer, nn.Conv1d):
+                            self.pre_computed_list.append(layer)
+                
+                # Collect activations and grad_outputs, precomputed_grads
+                activations = [[] for _ in range(len(self.gemm_key_order))]
+                grad_outputs = [[] for _ in range(len(self.gemm_key_order))]
+                linear_last_activations = []
+                linear_last_grad_outputs = []
+                linear_last_norms = []
+                embedding_activations = []
+                embedding_grad_outputs = []
+                embedding_vocab_sizes = []
+                precomputed_grads = []
+                precomputed_norms = []
+
+                for layer in self.embedding_list:
+                    embedding_activations.append(layer.activations[0])
+                    embedding_grad_outputs.append(layer.grad_outputs[0])
+                    embedding_vocab_sizes.append(layer.weight.shape[0])
+
+                for layer in self.linear_last_list:
+                    linear_last_activations.append(layer.activations[0])
+                    linear_last_grad_outputs.append(layer.grad_outputs[0])
+                    linear_last_norms.append(layer.weight.grad_sample_norms[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                for layer in self.linear_list:
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    activations[config_idx].append(layer.activations[0])
+                    grad_outputs[config_idx].append(layer.grad_outputs[0])
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                for layer in self.rnn_list:
+                    # weight_ih
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    activations[config_idx].append(layer.activations[0])
+                    grad_outputs[config_idx].append(layer.grad_outputs[0])
+
+                    # weight_hh
+                    N = layer.activations[1].shape[0]
+                    seq_len = layer.activations[1].shape[1]
+                    in_features = layer.activations[1].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    activations[config_idx].append(layer.activations[1])
+                    grad_outputs[config_idx].append(layer.grad_outputs[0])
+
+                    # bias
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                    # reverse
+                    if layer.bidirectional:
+                        # weight_ih_reverse
+                        N = layer.activations[0].shape[0]
+                        seq_len = layer.activations[0].shape[1]
+                        in_features = layer.activations[0].shape[2]
+                        out_features = layer.grad_outputs[1].shape[2]
+
+                        config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                        activations[config_idx].append(layer.activations[0])
+                        grad_outputs[config_idx].append(layer.grad_outputs[1])
+
+                        # weight_hh_reverse
+                        N = layer.activations[2].shape[0]
+                        seq_len = layer.activations[2].shape[1]
+                        in_features = layer.activations[2].shape[2]
+                        out_features = layer.grad_outputs[1].shape[2]
+
+                        config_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                        activations[config_idx].append(layer.activations[2])
+                        grad_outputs[config_idx].append(layer.grad_outputs[1])
+
+                        # bias_reverse
+                        if layer.bias_reverse is not None:
+                            precomputed_grads.append(layer.bias_reverse.grad_sample)
+
+                for layer in self.pre_computed_list:
+                    precomputed_grads.append(layer.weight.grad_sample)
+                    if layer.bias is not None:
+                        precomputed_grads.append(layer.bias.grad_sample)
+
+                if len(linear_last_norms) > 0:
+                    precomputed_norms = [torch.stack(linear_last_norms, dim=1).norm(2, dim=1)]
+                else:
+                    precomputed_norms = [torch.zeros((self.batch_size,)).cuda()]
+                
+                profiler.record("Clip/reduce")
+                # Compute accumulated per-batch gradient and scaling_factors
+                result_grad_example_module = \
+                    grad_example_module.get_clip_and_reduced_grads_linear(self.configs, activations, grad_outputs,
+                                                                precomputed_grads, precomputed_norms,
+                                                                linear_last_activations, linear_last_grad_outputs,
+                                                                embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier, config.quantization, 
+                                                                config.verbose, config.profile_time, config.profile_memory)
+
+                # torch.cuda.synchronize()
+                profiler.start_interval_time = time.time()
+                profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
+                profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
+                profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+
+                per_batch_grads, \
+                per_batch_grads_from_precomputed, \
+                per_batch_linear_last_grads, \
+                per_batch_embedding_grads = result_grad_example_module.get_per_batch_grads()
+
+                # Set per-batch grads of key GEMM layers
+                # Set per-batch grads of key GEMM layers
+                key_gemm_idx = self.start_key_gemm_idx.copy()
+                precomputed_idx = 0
+                last_linear_idx = 0
+                embedding_idx = 0
+
+                for layer in self.embedding_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_embedding_grads[embedding_idx])
+                    embedding_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+
+                for layer in self.linear_last_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_linear_last_grads[last_linear_idx])
+                    last_linear_idx += 1
+
+                    # Set per-batch grads of pre-computed layers
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
+
+                for layer in self.linear_list:
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    key_gemm_idx[gemm_idx] += 1
+
+                    # Set per-batch grads of pre-computed layers
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # Clean activations and grad_outputs
+                    layer.activations = []
+                    layer.grad_outputs = []
+                    layer.weight.grad_sample_norms = None
+
+                for layer in self.rnn_list:
+                    # weight_ih
+                    N = layer.activations[0].shape[0]
+                    seq_len = layer.activations[0].shape[1]
+                    in_features = layer.activations[0].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    layer.weight_ih.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    key_gemm_idx[gemm_idx] += 1
+
+                    # weight_hh
+                    N = layer.activations[1].shape[0]
+                    seq_len = layer.activations[1].shape[1]
+                    in_features = layer.activations[1].shape[2]
+                    out_features = layer.grad_outputs[0].shape[2]
+
+                    gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                    layer.weight_hh.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    key_gemm_idx[gemm_idx] += 1
+
+                    # bias
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    # reverse
+                    if layer.bidirectional:
+                        # weight_ih_reverse
+                        N = layer.activations[0].shape[0]
+                        seq_len = layer.activations[0].shape[1]
+                        in_features = layer.activations[0].shape[2]
+                        out_features = layer.grad_outputs[1].shape[2]
+
+                        gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                        layer.weight_ih_reverse.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                        key_gemm_idx[gemm_idx] += 1
+
+                        # weight_hh_reverse
+                        N = layer.activations[1].shape[0]
+                        seq_len = layer.activations[1].shape[1]
+                        in_features = layer.activations[1].shape[2]
+                        out_features = layer.grad_outputs[0].shape[2]
+
+                        gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
+                        layer.weight_hh_reverse.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                        key_gemm_idx[gemm_idx] += 1
+
+                        # bias_reverse
+                        if layer.bias_reverse is not None:
+                            layer.bias_reverse.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                            precomputed_idx += 1
+
+                    layer.activations = []
+                    layer.grad_outputs = []
+
+                for layer in self.pre_computed_list:
+                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    precomputed_idx += 1
+                    if layer.bias is not None:
+                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        precomputed_idx += 1
+
+                    layer.activations = []
+
+        # Save gradients
+        if config.grad_save_path:
+            grad_dict = {}
+            for name, p in self.module.named_parameters():
+                if p.requires_grad_opacus:
+                    # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+                    if len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                        N, C, H, W = p.shape
+                        grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
+                    else:
+                        grad_dict[name] = p.summed_grad.view_as(p)
+                    # print(p.summed_grad.view_as(p).stride())
+            torch.save(grad_dict, config.grad_save_path)
+
 
     def add_noise(self):
         """
@@ -420,17 +1194,26 @@ class DPOptimizer(Optimizer):
         """
 
         for p in self.params:
-            _check_processed_flag(p.summed_grad)
-
-            noise = _generate_noise(
-                std=self.noise_multiplier * self.max_grad_norm,
-                reference=p.summed_grad,
-                generator=self.generator,
-                secure_mode=self.secure_mode,
-            )
-            p.grad = (p.summed_grad + noise).view_as(p)
+            if not config.dpsgd_mode == MODE_ELEGANT:
+                _check_processed_flag(p.summed_grad)
+            
+                noise = _generate_noise(
+                    std=self.noise_multiplier * self.max_grad_norm,
+                    reference=p.summed_grad,
+                    generator=self.generator,
+                    secure_mode=self.secure_mode,
+                )
+                p.grad = (p.summed_grad + noise).view_as(p)
+            else:
+                if len(p.shape) == 4:
+                    K, C, R, S = p.shape
+                    p.grad = p.summed_grad.view([K, R, S, C]).permute(0, 3, 1, 2)
+                else:
+                    p.grad = p.summed_grad.view_as(p)
 
             _mark_as_processed(p.summed_grad)
+
+            p.summed_grad = None
 
     def scale_grad(self):
         """
@@ -477,7 +1260,8 @@ class DPOptimizer(Optimizer):
         self.original_optimizer.zero_grad(set_to_none)
 
     def pre_step(
-        self, closure: Optional[Callable[[], float]] = None
+        self, closure: Optional[Callable[[], float]] = None,
+        **kwargs
     ) -> Optional[float]:
         """
         Perform actions specific to ``DPOptimizer`` before calling
@@ -487,7 +1271,9 @@ class DPOptimizer(Optimizer):
             closure: A closure that reevaluates the model and
                 returns the loss. Optional for most optimizers.
         """
-        self.clip_and_accumulate()
+        self.clip_and_accumulate(**kwargs)
+        profiler.record("Clip/reduce")
+
         if self._check_skip_next_step():
             self._is_last_step_skipped = True
             return False
@@ -495,18 +1281,20 @@ class DPOptimizer(Optimizer):
         self.add_noise()
         self.scale_grad()
 
+        profiler.record("Add noise")
+
         if self.step_hook:
             self.step_hook(self)
 
         self._is_last_step_skipped = False
         return True
 
-    def step(self, closure: Optional[Callable[[], float]] = None) -> Optional[float]:
+    def step(self, closure: Optional[Callable[[], float]] = None, **kwargs) -> Optional[float]:
         if closure is not None:
             with torch.enable_grad():
                 closure()
 
-        if self.pre_step():
+        if self.pre_step(**kwargs):
             return self.original_optimizer.step()
         else:
             return None

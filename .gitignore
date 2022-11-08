@@ -112,3 +112,14 @@ website/static/js/*
 !website/static/js/code_block_buttons.js
 website/static/_sphinx-sources/
 spelling_wordlist.txt
+website/
+
+# Cutlass lib build
+cutlass_wgrad_grouped/build
+
+# nvvp files
+**/*.nvvp
+**/.vscode/
+
+.circleci
+.github

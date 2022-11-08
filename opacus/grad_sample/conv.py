@@ -21,10 +21,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from opacus.utils.tensor_utils import unfold2d, unfold3d
+from opacus import config
+from opacus.config import MODE_NAIVE, MODE_REWEIGHT, MODE_ELEGANT
+from opacus.custom_tensor import GradOutputs, PerSampleGrads
+from opacus.utils.quant_utils import batch_quantization_encode
 from opt_einsum import contract
 
 from .utils import register_grad_sampler
 
+from opacus.profiler import profiler
+
+from multiprocessing.dummy import Pool as ThreadPool
+
+pool = ThreadPool(4)
 
 @register_grad_sampler([nn.Conv1d, nn.Conv2d, nn.Conv3d])
 def compute_conv_grad_sample(
@@ -40,63 +49,152 @@ def compute_conv_grad_sample(
         activations: Activations
         backprops: Backpropagations
     """
-    n = activations.shape[0]
-    # get activations and backprops in shape depending on the Conv layer
-    if type(layer) == nn.Conv2d:
-        activations = unfold2d(
-            activations,
-            kernel_size=layer.kernel_size,
-            padding=layer.padding,
-            stride=layer.stride,
-            dilation=layer.dilation,
-        )
-    elif type(layer) == nn.Conv1d:
-        activations = activations.unsqueeze(-2)  # add the H dimension
-        # set arguments to tuples with appropriate second element
-        if layer.padding == "same":
-            total_pad = layer.dilation[0] * (layer.kernel_size[0] - 1)
-            left_pad = math.floor(total_pad / 2)
-            right_pad = total_pad - left_pad
-        elif layer.padding == "valid":
-            left_pad, right_pad = 0, 0
+    # print(activations)
+    # print(backprops)
+    # print("activations")
+    # print(activations.stride())
+    # print(activations.flatten()[0:10])
+    # print("output_grads")
+    # print(backprops.stride())
+    # print(backprops.flatten()[0:10])
+    backprops = GradOutputs(backprops)
+    profiler.record("Backward weight")
+
+    origin_mode = config.dpsgd_mode
+    if config.model_type == "rnn" and config.dpsgd_mode == MODE_ELEGANT:
+        config.dpsgd_mode = MODE_NAIVE
+
+    if config.dpsgd_mode == MODE_ELEGANT:
+        if config.quantization:
+            backprops_q, activations_q = batch_quantization_encode([backprops, activations])
+            m, scale = backprops_q
+            layer.grad_outputs = [GradOutputs(m)]
+            layer.grad_outputs_scale = scale
+            actv_int, actv_scale = activations_q
+            layer.activations = [actv_int]
+            layer.activations_scale = actv_scale
         else:
-            left_pad, right_pad = layer.padding[0], layer.padding[0]
-        activations = F.pad(activations, (left_pad, right_pad))
-        activations = torch.nn.functional.unfold(
-            activations,
-            kernel_size=(1, layer.kernel_size[0]),
-            stride=(1, layer.stride[0]),
-            dilation=(1, layer.dilation[0]),
-        )
-    elif type(layer) == nn.Conv3d:
-        activations = unfold3d(
-            activations,
-            kernel_size=layer.kernel_size,
-            padding=layer.padding,
-            stride=layer.stride,
-            dilation=layer.dilation,
-        )
-    backprops = backprops.reshape(n, -1, activations.shape[-1])
+            layer.grad_outputs = [GradOutputs(backprops)]
+            layer.activations = [activations]
+
+    n = activations.shape[0]
+    if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+        # get activations and backprops in shape depending on the Conv layer
+        if type(layer) == nn.Conv2d:
+            activations = unfold2d(
+                activations,
+                kernel_size=layer.kernel_size,
+                padding=layer.padding,
+                stride=layer.stride,
+                dilation=layer.dilation,
+            )
+        elif type(layer) == nn.Conv1d:
+            activations = activations.unsqueeze(-2)  # add the H dimension
+            # set arguments to tuples with appropriate second element
+            if layer.padding == "same":
+                total_pad = layer.dilation[0] * (layer.kernel_size[0] - 1)
+                left_pad = math.floor(total_pad / 2)
+                right_pad = total_pad - left_pad
+            elif layer.padding == "valid":
+                left_pad, right_pad = 0, 0
+            else:
+                left_pad, right_pad = layer.padding[0], layer.padding[0]
+            activations = F.pad(activations, (left_pad, right_pad))
+            activations = torch.nn.functional.unfold(
+                activations,
+                kernel_size=(1, layer.kernel_size[0]),
+                stride=(1, layer.stride[0]),
+                dilation=(1, layer.dilation[0]),
+            )
+        elif type(layer) == nn.Conv3d:
+            activations = unfold3d(
+                activations,
+                kernel_size=layer.kernel_size,
+                padding=layer.padding,
+                stride=layer.stride,
+                dilation=layer.dilation,
+            )
+    if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+        backprops = backprops.reshape(n, -1, activations.shape[-1])
+    if config.dpsgd_mode == MODE_ELEGANT:
+        backprops = backprops.view(n, backprops.shape[1], -1)
 
     ret = {}
-    if layer.weight.requires_grad:
-        # n=batch_sz; o=num_out_channels; p=(num_in_channels/groups)*kernel_sz
-        grad_sample = contract("noq,npq->nop", backprops, activations)
-        # rearrange the above tensor and extract diagonals.
-        grad_sample = grad_sample.view(
-            n,
-            layer.groups,
-            -1,
-            layer.groups,
-            int(layer.in_channels / layer.groups),
-            np.prod(layer.kernel_size),
-        )
-        grad_sample = contract("ngrg...->ngr...", grad_sample).contiguous()
-        shape = [n] + list(layer.weight.shape)
-        ret[layer.weight] = grad_sample.view(shape)
+    if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+        if layer.weight.requires_grad_opacus:
+            # n=batch_sz; o=num_out_channels; p=(num_in_channels/groups)*kernel_sz
+            # print(backprops.shape, activations.shape)
+            # print(layer.groups, layer.kernel_size, layer.in_channels, layer.out_channels)
+            if type(layer) == nn.Conv1d:
+                backprops = backprops.view(n, layer.groups, -1, backprops.shape[2])
+                activations = activations.view(n, layer.groups, -1, activations.shape[2])
+                grad_sample = PerSampleGrads(contract("ngoq,ngpq->ngop", backprops, activations, backend="torch"))
+                backprops = backprops.view(n, -1, backprops.shape[3])
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(contract("noq,npq->nop", backprops, activations, backend="torch"))
+            # print(grad_sample.shape)
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
+            # grad_sample = PerSampleGrads(torch.einsum("noq,npq->nop", backprops, activations))
+            del activations
+            # rearrange the above tensor and extract diagonals.
+            if type(layer) == nn.Conv1d:
+                grad_sample = PerSampleGrads(grad_sample.view(
+                    n,
+                    layer.groups,
+                    -1,
+                    # layer.groups,
+                    int(layer.in_channels / layer.groups),
+                    np.prod(layer.kernel_size),
+                ))
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(grad_sample.view(
+                    n,
+                    layer.groups,
+                    -1,
+                    layer.groups,
+                    int(layer.in_channels / layer.groups),
+                    np.prod(layer.kernel_size),
+                ))
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
+            if type(layer) == nn.Conv1d:
+                grad_sample = PerSampleGrads(grad_sample.contiguous())
+            if type(layer) == nn.Conv2d:
+                grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
+                
+                # print("per_example_grads")
+                # print(grad_sample.permute(0, 1, 4, 2, 3).flatten()[0:10])
+            # print(grad_sample.shape, layer.weight.shape)
+            # print(f"grad_sample : {grad_sample.numel() * 4}")
+            # grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())
+            # profiler.record("Backward weight")
 
-    if layer.bias is not None and layer.bias.requires_grad:
-        ret[layer.bias] = torch.sum(backprops, dim=2)
+            shape = [n] + list(layer.weight.shape)
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+                ret[layer.weight] = PerSampleGrads(grad_sample.view(shape))
+            # if config.dpsgd_mode == MODE_REWEIGHT:
+            #     if type(layer) == nn.Conv2d:
+            #         reduce_dims = (1, 2, 3, 4)
+            #     elif type(layer) == nn.Conv1d:
+            #         reduce_dims = (1, 2, 3) 
+            #     layer.weight.grad_sample_norms = [grad_sample.view(shape).norm(2, dim=reduce_dims)]
+            #     profiler.record("Clip/reduce")
+
+    if layer.bias is not None and layer.bias.requires_grad_opacus:
+        # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
+        ret[layer.bias] = PerSampleGrads(torch.sum(backprops, dim=2))
+        # profiler.record("Backward weight")
+        # if config.dpsgd_mode == MODE_REWEIGHT:
+        #     backprops = PerSampleGrads(torch.sum(backprops, dim=2))
+        #     profiler.record("Backward weight")
+        #     layer.bias.grad_sample_norms = [backprops.norm(2, dim=(1,))]
+        #     profiler.record("Clip/reduce")
+
+    if config.model_type == "rnn" and config.dpsgd_mode == MODE_NAIVE:
+        config.dpsgd_mode = origin_mode
+
+    # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+    #     del backprops
+    #     del grad_sample
 
     return ret
 

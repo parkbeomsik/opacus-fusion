@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import warnings
 from functools import partial
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -30,7 +30,16 @@ from opacus.utils.module_utils import (
     trainable_modules,
     trainable_parameters,
 )
+from opacus import config
+from opacus.config import MODE_NAIVE, MODE_REWEIGHT, MODE_ELEGANT
+from opacus.utils.quant_utils import batch_quantization_encode
 
+from opacus.profiler import profiler
+from opacus.layers import dp_fast_rnn
+from opacus.layers.dp_fast_rnn import DPFASTLSTM
+from opacus.custom_tensor import GradOutputs, PerSampleGrads
+
+import gc
 
 logger = logging.getLogger(__name__)
 
@@ -49,20 +58,33 @@ def create_or_accumulate_grad_sample(
             shape as ``param`` with extra batch dimension
         layer: nn.Module parameter belongs to
     """
-    if param.requires_grad:
+    if param.requires_grad_opacus:
         if hasattr(param, "_current_grad_sample"):
             param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
         else:
-            param._current_grad_sample = torch.zeros(
+            # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+            # gc.collect()
+            profiler.record("Backward weight")
+            zero = PerSampleGrads(torch.zeros(
                 torch.Size([max_batch_len]) + grad_sample.shape[1:],
                 device=grad_sample.device,
                 dtype=grad_sample.dtype,
-            )
+            ))
+            profiler.record_memory()
+            param._current_grad_sample = zero
+            
             param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            profiler.record("Clip/reduce")
+            
+            # param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
-    if p.requires_grad:
+    if p.requires_grad_opacus:
+        if config.dpsgd_mode == MODE_REWEIGHT or config.dpsgd_mode == MODE_ELEGANT:
+            if not hasattr(p, "_current_grad_sample"):
+                return
+
         if p.grad_sample is not None:
             if isinstance(p.grad_sample, list):
                 p.grad_sample.append(p._current_grad_sample)
@@ -142,9 +164,32 @@ class GradSampleModule(AbstractGradSampleModule):
             batch_first=batch_first,
             force_functorch=force_functorch,
         )
+        
+        self.dummy_weight = torch.ones((1,), device=torch.device("cuda"), requires_grad=True)
+
 
     def forward(self, *args, **kwargs):
-        return self._module(*args, **kwargs)
+        if config.model_type == "cnn":
+            new_args = []
+            for arg in args:
+                new_args.append((arg.to(torch.float32)*self.dummy_weight).to(arg.dtype))
+            return self._module(*new_args, **kwargs)
+        if config.model_type == "transformer":
+            for name, module in trainable_modules(self):
+                if "word_embeddings" in name:
+                    module.requires_grad_(True)
+            return self._module(*args, **kwargs)
+        if config.model_type == "rnn":
+            if config.architecture == "deepspeech":
+                new_args = []
+                for arg in args:
+                    new_args.append((arg.to(torch.float32)*self.dummy_weight).to(arg.dtype))
+                return self._module(*new_args, **kwargs)
+            if config.architecture == "gnmt":
+                for name, module in trainable_modules(self):
+                    if "embedder" in name:
+                        module.requires_grad_(True)
+                return self._module(*args, **kwargs)
 
     def add_hooks(
         self,
@@ -235,14 +280,34 @@ class GradSampleModule(AbstractGradSampleModule):
         a bug in Autograd that makes removing hooks do nothing if the graph was already
         constructed. For this reason, we have this method to at least turn them off.
         """
+        if self.hooks_enabled:
+            # Create requires_grad to turn-on per-batch gradient computation
+            for _, p in trainable_parameters(self._module):
+                if p.requires_grad_opacus:
+                    p.requires_grad = True
+                else:
+                    p.requires_grad = False
+
         self.hooks_enabled = False
+
 
     def enable_hooks(self) -> None:
         r"""
         The opposite of ``disable_hooks()``. Hooks are always enabled unless you explicitly
         disable them so you don't need to call this unless you want to re-enable them.
         """
+        if not self.hooks_enabled:
+            # Create requires_grad_opacus to turn-off per-batch gradient computation
+            for _, p in self._module.named_parameters():
+                if p.requires_grad:
+                    p.requires_grad_opacus = True
+                else:
+                    p.requires_grad_opacus = False
+
+                p.requires_grad = False
+        
         self.hooks_enabled = True
+
 
     def _close(self):
         super()._close()
@@ -266,7 +331,12 @@ class GradSampleModule(AbstractGradSampleModule):
 
         if not hasattr(module, "activations"):
             module.activations = []
-        module.activations.append(forward_input[0].detach())  # pyre-ignore
+
+        if isinstance(module, DPFASTLSTM):
+            module.activations += dp_fast_rnn.input_actvs
+            dp_fast_rnn.input_actvs = []
+        else:
+            module.activations.append(forward_input[0].detach())  # pyre-ignore
 
         for _, p in trainable_parameters(module):
             p._forward_counter += 1
@@ -304,9 +374,18 @@ class GradSampleModule(AbstractGradSampleModule):
             batch_first: bool,
         """
         if not self.hooks_enabled:
+            profiler.record("Clip/reduce")
             return
 
-        backprops = forward_output[0].detach()
+        profiler.record("Backward activation")
+        # print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
+
+        if isinstance(module, DPFASTLSTM):
+            backprops = dp_fast_rnn.output_grads
+            backprops = list(map(lambda x: GradOutputs(x), backprops))
+            dp_fast_rnn.output_grads = []
+        else:
+            backprops = GradOutputs(forward_output[0].detach())
         activations, backprops = self.rearrange_grad_samples(
             module=module,
             backprops=backprops,
@@ -336,11 +415,55 @@ class GradSampleModule(AbstractGradSampleModule):
             if hasattr(module, "max_batch_len"):
                 del module.max_batch_len
 
+        # For reweight DP-SGD, compute norm of each parameters
+        if config.dpsgd_mode == MODE_REWEIGHT:
+            profiler.record("Backward weight")
+            for _, p in trainable_parameters(module):
+                if p._forward_counter == 0 and p.requires_grad_opacus:
+                    p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
+
+                    del p.grad_sample
+
+            profiler.record("Clip and reduce")
+
+        # Keep activations for later example-wise gradient computation
+        if config.dpsgd_mode == MODE_ELEGANT:
+            if (not isinstance(module, nn.LayerNorm)) and (not isinstance(module, nn.GroupNorm)):
+                pass
+                # if config.quantization and\
+                #     (((isinstance(module, DPFASTLSTM) or isinstance(module, nn.Linear)) and (config.model_type == "transformer" or config.model_type == "rnn"))):
+                #     if isinstance(module, DPFASTLSTM):
+                #         if module.bidirectional:
+                #             m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                #             m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                #             m3, scale3 = batch_quantization_encode(activations[2], bit=8)
+                #             module.activations = [m1, m2, m3]
+                #             module.activations_scale = [scale1, scale2, scale3]
+                #         else:
+                #             m1, scale1 = batch_quantization_encode(activations[0], bit=8)
+                #             m2, scale2 = batch_quantization_encode(activations[1], bit=8)
+                #             module.activations = [m1, m2]
+                #             module.activations_scale = [scale1, scale2]
+                #     else:
+                #         m, scale = batch_quantization_encode(activations, bit=8)
+                #         module.activations = [m]
+                #         module.activations_scale = scale
+                # elif not isinstance(module, nn.Conv2d):
+                #     if isinstance(module, DPFASTLSTM):
+                #         module.activations = activations
+                #     else:
+                #         module.activations = [activations]
+
+            else:
+                module.activations = []
+
+        profiler.record("Backward weight")
+
     def rearrange_grad_samples(
         self,
         *,
         module: nn.Module,
-        backprops: torch.Tensor,
+        backprops: Union[torch.Tensor, list[torch.Tensor]],
         loss_reduction: str,
         batch_first: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -361,15 +484,28 @@ class GradSampleModule(AbstractGradSampleModule):
             )
 
         batch_dim = 0 if batch_first or type(module) is RNNLinear else 1
+        is_rnn = isinstance(module, DPFASTLSTM)
 
-        activations = module.activations.pop()
+        if is_rnn:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+                activations = module.activations
+                module.activations = []
+            if config.dpsgd_mode == MODE_ELEGANT:
+                activations = module.activations
+                module.activations = []
+        else:
+            if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
+                activations = module.activations.pop()
+            if config.dpsgd_mode == MODE_ELEGANT:
+                # activations = module.activations[0]
+                activations = module.activations.pop()
 
         if not hasattr(module, "max_batch_len"):
             # For packed sequences, max_batch_len is set in the forward of the model (e.g. the LSTM)
             # Otherwise we infer it here
             module.max_batch_len = _get_batch_size(
                 module=module,
-                grad_sample=activations,
+                grad_sample=activations[0] if is_rnn else activations,
                 batch_dim=batch_dim,
             )
 

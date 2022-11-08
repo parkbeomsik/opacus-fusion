@@ -48,9 +48,9 @@ def compute_instance_norm_grad_sample(
         backprops: Backpropagations
     """
     ret = {}
-    if layer.weight.requires_grad:
+    if layer.weight.requires_grad_opacus:
         gs = F.instance_norm(activations, eps=layer.eps) * backprops
         ret[layer.weight] = contract("ni...->ni", gs)
-    if layer.bias is not None and layer.bias.requires_grad:
+    if layer.bias is not None and layer.bias.requires_grad_opacus:
         ret[layer.bias] = contract("ni...->ni", backprops)
     return ret

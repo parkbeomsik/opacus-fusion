@@ -1,0 +1,13 @@
+.vscode/
+build/
+dist/
+*.egg-info/
+test/int8_batched_gemm_kernels/
+test/int8_wgrad_kernels/
+test/int8_batched_gemm_tensor_core_kernels/
+test/int8_wgrad_tensor_core_kernels/
+test/tensorop_iwgrad_kernels/
+test/test_kernels/
+test/_*/
+*.a
+*.o
