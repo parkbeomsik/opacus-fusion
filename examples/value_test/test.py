@@ -1,18 +1,63 @@
 import subprocess
+import os
 
-model_cand = ["cnn resnet18", "cnn resnet50", "cnn resnet152"]
+from test_equal import is_equal
 
-for architecture, model in model_cand:
-    
+def execute_command(cmd):
+    ret = subprocess.run(cmd, shell=True, capture_output=True)
+    if ret.returncode != 0:
+        print(f"Error")
+        print(cmd)
+        print(ret.stderr.decode())
+        assert 0
 
-ret = subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture resnet152 --model_type cnn --dpsgd_mode naive --batch_size 4 --model_save_path value_test/value_data/resnet152_weight.pt --input_save_path value_test/value_data/resnet152_input.pt -c 0.1 --sigma 0.0", shell=True, capture_output=True)
+if not os.path.exists("value_data"):
+    os.mkdir("value_data")
+if not os.path.exists("grad_sample"):
+    os.mkdir("grad_sample")
 
-ret = subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture resnet152 --model_type cnn --dpsgd_mode naive --batch_size 16 --model_load_path value_test/value_data/resnet152_weight.pt --input_load_path value_test/value_data/resnet152_input.pt --grad_save_path value_test/value_data/resnet152_grad_naive.pt --profile_value -c 0.1 --sigma 0.0", shell=True, capture_output=True)
-if ret.returncode != 0:
-    print("[Failed] Full command : nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture sample_conv_net --model_type cnn --dpsgd_mode naive --batch_size 16 --model_load_path value_test/value_data/sample_conv_net_weight.pt --input_load_path value_test/value_data/sample_conv_net_input.pt --grad_save_path value_test/value_data/sample_conv_net_grad_naive.pt --profile_value -c 0.1")
+case_list = ["cnn resnet18", "cnn resnet50", "cnn resnet152"]
 
-subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture sample_conv_net --model_type cnn --dpsgd_mode naive --batch_size 16 --model_load_path value_test/value_data/sample_conv_net_weight.pt --input_load_path value_test/value_data/sample_conv_net_input.pt --grad_save_path value_test/value_data/sample_conv_net_grad_naive.pt --profile_value -c 0.1", shell=True, capture_output=True)
-subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture sample_conv_net --model_type cnn --dpsgd_mode reweight --batch_size 16 --model_load_path value_test/value_data/sample_conv_net_weight.pt --input_load_path value_test/value_data/sample_conv_net_input.pt --grad_save_path value_test/value_data/sample_conv_net_grad_reweight.pt --profile_value -c 0.1", shell=True, capture_output=True)
-subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture sample_conv_net --model_type cnn --dpsgd_mode elegant --batch_size 16 --model_load_path value_test/value_data/sample_conv_net_weight.pt --input_load_path value_test/value_data/sample_conv_net_input.pt --grad_save_path value_test/value_data/sample_conv_net_grad_elegant.pt --profile_value -c 0.1", shell=True, capture_output=True)
+for case in case_list:
+    model_type, architecture = case.split(" ")
+    print(f"============================================")
+    print(f"Test {model_type} ({architecture})...")
 
-subprocess.run("nice -n 10 /home/beomsik/miniconda3/envs/fusion/bin/python benchmark.py --steps 1 --input_size 32 --architecture resnet18 --model_type cnn --dpsgd_mode naive --batch_size 16 --model_load_path value_test/value_data/resnet18_weight.pt --input_load_path value_test/value_data/resnet18_input.pt --grad_save_path value_test/value_data/resnet18_grad_naive.pt --profile_value -c 0.1 --sigma 0.0", shell=True, capture_output=True)
+    # Create fixed weight and input
+    execute_command(f"python benchmark.py --input_size 32 --architecture {architecture} --model_type {model_type} --dpsgd_mode naive --batch_size 4 --model_save_path value_test/value_data/{architecture}_weight.pt --input_save_path value_test/value_data/{architecture}_input.pt -c 0.1 --sigma 0.0")
+
+    # Create reference grads (naive DPSGD)
+    print("Execute naive...")
+    execute_command(f"python benchmark.py --input_size 32 --architecture {architecture} --model_type {model_type} --dpsgd_mode naive --batch_size 16 --model_load_path value_test/value_data/{architecture}_weight.pt --input_load_path value_test/value_data/{architecture}_input.pt --grad_save_path value_test/value_data/{architecture}_grad_naive.pt --profile_value -c 0.1 --sigma 0.0")
+
+    # Test grads of DPSGD(R)
+    print("Execute reweight...")
+    execute_command(f"python benchmark.py --input_size 32 --architecture {architecture} --model_type {model_type} --dpsgd_mode reweight --batch_size 16 --model_load_path value_test/value_data/{architecture}_weight.pt --input_load_path value_test/value_data/{architecture}_input.pt --grad_save_path value_test/value_data/{architecture}_grad_reweight.pt --profile_value -c 0.1 --sigma 0.0")
+
+    reweight_ret = is_equal(f"value_test/value_data/{architecture}_grad_naive.pt",
+                            f"value_test/value_data/{architecture}_grad_reweight.pt",
+                            verbose=False)
+
+    if reweight_ret:
+        print("Results of reweight is correct!")
+    else:
+        print("Results of reweight is wrong!")
+        is_equal(f"value_test/value_data/{architecture}_grad_naive.pt",
+                 f"value_test/value_data/{architecture}_grad_reweight.pt",
+                 verbose=True)
+
+    # Test grads of elegant
+    print("Execute elegant ...")
+    execute_command(f"python benchmark.py --steps 1 --input_size 32 --architecture {architecture} --model_type {model_type} --dpsgd_mode elegant --batch_size 16 --model_load_path value_test/value_data/{architecture}_weight.pt --input_load_path value_test/value_data/{architecture}_input.pt --grad_save_path value_test/value_data/{architecture}_grad_elegant.pt --profile_value -c 0.1 --sigma 0.0")
+
+    elegant_ret = is_equal(f"value_test/value_data/{architecture}_grad_naive.pt",
+                           f"value_test/value_data/{architecture}_grad_elegant.pt",
+                           verbose=False)
+
+    if elegant_ret:
+        print("Results of elegant is correct!")
+    else:
+        print("Results of elegant is wrong!")
+        is_equal(f"value_test/value_data/{architecture}_grad_naive.pt",
+                 f"value_test/value_data/{architecture}_grad_elegant.pt",
+                 verbose=True)

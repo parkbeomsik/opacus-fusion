@@ -113,8 +113,8 @@ def print_args(args):
     print(f"Verbose          : {args.verbose}")
 
 def main():  # noqa: C901
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
+    # torch.backends.cudnn.benchmark = False
+    # torch.use_deterministic_algorithms(True)
 
     world_size = 1
 
@@ -141,7 +141,7 @@ def main():  # noqa: C901
             assert 0, "Config is wrong."
 
     config.profile_throughput = args.profile_throughput
-    config.profile_time = args.profile_time or args.profile_throughput
+    config.profile_time = args.profile_time # or args.profile_throughput
     config.profile_memory = args.profile_memory
     config.verbose = args.verbose
 

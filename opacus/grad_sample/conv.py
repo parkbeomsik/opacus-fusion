@@ -51,12 +51,12 @@ def compute_conv_grad_sample(
     """
     # print(activations)
     # print(backprops)
-    print("activations")
-    print(activations.stride())
-    print(activations.flatten()[0:10])
-    print("output_grads")
-    print(backprops.stride())
-    print(backprops.flatten()[0:10])
+    # print("activations")
+    # print(activations.stride())
+    # print(activations.flatten()[0:10])
+    # print("output_grads")
+    # print(backprops.stride())
+    # print(backprops.flatten()[0:10])
     backprops = GradOutputs(backprops)
     profiler.record("Backward weight")
 
@@ -161,8 +161,8 @@ def compute_conv_grad_sample(
             if type(layer) == nn.Conv2d:
                 grad_sample = PerSampleGrads(contract("ngrg...->ngr...", grad_sample, backend="torch").contiguous())
                 
-                print("per_example_grads")
-                print(grad_sample.permute(0, 1, 4, 2, 3).flatten()[0:10])
+                # print("per_example_grads")
+                # print(grad_sample.permute(0, 1, 4, 2, 3).flatten()[0:10])
             # print(grad_sample.shape, layer.weight.shape)
             # print(f"grad_sample : {grad_sample.numel() * 4}")
             # grad_sample = PerSampleGrads(torch.einsum("ngrg...->ngr...", grad_sample).contiguous())

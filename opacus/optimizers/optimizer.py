@@ -423,10 +423,10 @@ class DPOptimizer(Optimizer):
             per_sample_clip_factor = (self.max_grad_norm / (per_sample_norms + 1e-6)).clamp(
                 max=1.0
             )
-            print("per_sample_norms")
-            print(per_sample_norms)
-            print("scaling_factors")
-            print(per_sample_clip_factor*100)
+            # print("per_sample_norms")
+            # print(per_sample_norms)
+            # print("scaling_factors")
+            # print(per_sample_clip_factor*100)
 
             for p in self.params:
                 _check_processed_flag(p.grad_sample)
@@ -524,7 +524,7 @@ class DPOptimizer(Optimizer):
                             input_W = layer.activations[0].shape[3]
                             break
 
-                    print(input_H, input_W)
+                    # print(input_H, input_W)
 
                     if input_H * input_W < 32*32 + 1:
                         split_k_size = 1024
@@ -546,12 +546,12 @@ class DPOptimizer(Optimizer):
                             pad_h, pad_w = layer.padding
                             stride_h, stride_w = layer.stride
                             dilation_h, dilation_w = layer.dilation
-                            print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
+                            # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
                                                                                 dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
-                            args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
-                            print(f"{i} {'x'.join(args)}")
+                            # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
+                            # print(f"{i} {'x'.join(args)}")
                             # i += 1
 
                     self._trainable_modules_cache = list(trainable_modules(self.module))
@@ -603,7 +603,7 @@ class DPOptimizer(Optimizer):
                 precomputed_norms = [torch.stack(linear_norms, dim=1).norm(2, dim=1)]
                 
                 profiler.record("Clip/reduce")
-                print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
+                # print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
                     grad_example_module.get_clip_and_reduced_grads_conv(self.configs, activations, grad_outputs,
@@ -619,7 +619,7 @@ class DPOptimizer(Optimizer):
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
                 profiler.add_memory_explicit("Workspace", result_grad_example_module.get_workspace_size())
-                print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
+                # print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
 
                 per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
 
@@ -841,7 +841,7 @@ class DPOptimizer(Optimizer):
                     layer.grad_outputs = []
                     layer.weight.grad_sample_norms = None
 
-                print(f"{(time.time() - start) * 1000}")
+                # print(f"{(time.time() - start) * 1000}")
 
             if config.model_type == "rnn":
                 if self.first_run:
