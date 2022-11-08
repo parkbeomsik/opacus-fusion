@@ -146,6 +146,7 @@ struct Conv2dDescriptor {
     //// For per-batch reweight
     cudnnTensorDescriptor_t input_batch_desc;
     cudnnTensorDescriptor_t output_batch_desc;
+    cudnnFilterDescriptor_t filter_batch_desc;
     cudnnConvolutionBwdFilterAlgo_t bwd_filter_batch_algo_best;
     size_t bwd_filter_batch_algo_best_workspace_size;
     void * batch_workspace_ptr;

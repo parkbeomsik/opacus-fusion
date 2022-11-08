@@ -168,6 +168,15 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
                                         config->P,
                                         config->Q));
 
+    checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_batch_desc));
+    checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_batch_desc,
+                                        dtype,
+                                        CUDNN_TENSOR_NHWC,
+                                        config->K,
+                                        config->C,
+                                        config->R,
+                                        config->S));
+
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_batch_desc,
                                         CUDNN_TENSOR_NHWC,
@@ -278,7 +287,7 @@ void set_cudnn_per_batch_algorithm(std::vector<torch::Tensor>& actvs,
                                                             descriptors.at(i).input_batch_desc,
                                                             descriptors.at(i).output_batch_desc,
                                                             descriptors.at(i).conv_desc,
-                                                            descriptors.at(i).filter_desc,
+                                                            descriptors.at(i).filter_batch_desc,
                                                             CUDNN_CONVOLUTION_BWD_FILTER_ALGO_COUNT,
                                                             &returned_algo_count,
                                                             bwd_filter_algo_perf));
@@ -636,7 +645,6 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
   using namespace torch::indexing;
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {1}, false);
-  // std::cout << "Norm " << norm << std::endl;
   compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm, num_rows_to_compute);
 }
 
@@ -939,6 +947,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     else {
       // torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
       temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
+      // temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::ChannelsLast);
     }
 
     LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);
@@ -975,7 +985,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                 descriptor.batch_workspace_ptr,
                                                 descriptor.bwd_filter_batch_algo_best_workspace_size,
                                                 &beta,
-                                                descriptor.filter_desc,
+                                                descriptor.filter_batch_desc,
                                                 per_batch_grads.at(i).data_ptr()));
     }
   }
@@ -1124,7 +1134,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       }
 
       // Warm up
-      for (int i = 0; i < 10; ++i) {
+      for (int i = 0; i < 3; ++i) {
         benchmark_cudnn_and_cutlass(actvs, ograds, end_cudnn_layer, quant); 
       }
       // printf("Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
@@ -1132,7 +1142,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       auto startTime = std::chrono::high_resolution_clock::now();
 
       // Run clip_and_reduce_grads
-      for (int i = 0; i < 10; ++i) {
+      for (int i = 0; i < 5; ++i) {
         benchmark_cudnn_and_cutlass(actvs, ograds, end_cudnn_layer, quant);
       }
 
@@ -1237,7 +1247,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       auto startTime = std::chrono::high_resolution_clock::now();
 
       // Run clip_and_reduce_grads
-      for (int i = 0; i < 10; ++i) {
+      for (int i = 0; i < 3; ++i) {
         auto _ = clip_and_reduce_grads_conv(configs,
                                             actvs,
                                             ograds,
@@ -1318,22 +1328,22 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
 
   _first_run = false;
 
-  auto _ = clip_and_reduce_grads_conv(configs,
-                                    actvs,
-                                    ograds,
-                                    precomputed_per_example_grads,
-                                    precomputed_per_example_grad_norms,
-                                    linear_actvs,
-                                    linear_ograds,
-                                    best_end_non_reweight_layer,
-                                    best_end_cudnn_layer,
-                                    batch_count,
-                                    max_norm,
-                                    noise_multiplier,
-                                    quant,
-                                    verbose,
-                                    profile_time,
-                                    profile_memory);
+  // auto _ = clip_and_reduce_grads_conv(configs,
+  //                                   actvs,
+  //                                   ograds,
+  //                                   precomputed_per_example_grads,
+  //                                   precomputed_per_example_grad_norms,
+  //                                   linear_actvs,
+  //                                   linear_ograds,
+  //                                   best_end_non_reweight_layer,
+  //                                   best_end_cudnn_layer,
+  //                                   batch_count,
+  //                                   max_norm,
+  //                                   noise_multiplier,
+  //                                   quant,
+  //                                   verbose,
+  //                                   profile_time,
+  //                                   profile_memory);
 
   return clip_and_reduce_grads_conv(configs,
                                     actvs,

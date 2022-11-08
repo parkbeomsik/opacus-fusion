@@ -44,5 +44,5 @@ def is_equal(path_1, path_2, verbose=True):
 
 if __name__ == "__main__":
     is_equal("value_test/value_data/resnet152_grad_naive.pt",
-             "value_test/value_data/resnet152_grad_elegant.pt")
+             "value_test/value_data/resnet152_grad_elegant.pt", True)
             
