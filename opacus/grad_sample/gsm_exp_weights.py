@@ -72,11 +72,42 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
             loss_reduction=loss_reduction,
         )
 
-        for _, p in m.named_parameters():
-            if p.requires_grad:
-                p.requires_grad_opacus = True
-            else:
-                p.requires_grad_opacus = False
+        # for _, p in m.named_parameters():
+        #     if p.requires_grad:
+        #         p.requires_grad_opacus = True
+        #     else:
+        #         p.requires_grad_opacus = False
+
+        for _module_name, _module in m.named_modules():
+            if not any(p is not None for p in _module.parameters(recurse=False)):
+                continue
+
+            for _, p in _module.named_parameters():            
+                if p.requires_grad:
+                    p.requires_grad_opacus = True
+                else:
+                    p.requires_grad_opacus = False
+            
+            if config.dpsgd_mode == MODE_ELEGANT:
+                if config.model_type == "cnn":
+                    if type(_module) == nn.Conv2d:
+                        _module.weight.requires_grad = False
+
+                    if type(_module) == nn.Linear:
+                        _module.weight.requires_grad = False
+                
+                if config.model_type == "transformer":
+                    if type(_module) == nn.Linear:
+                        # If out_features of weight is small,
+                        # it is last linear layer
+                        if _module.weight.shape[0] > 100:
+                            _module.weight.requires_grad = False
+
+                    if type(_module) == nn.Embedding:
+                        _module.weight.requires_grad = False
+
+        self.hooks_enabled = True
+        self._module.hooks_enabled = True
 
         if (config.dpsgd_mode == MODE_REWEIGHT
             or config.dpsgd_mode == MODE_ELEGANT):
@@ -100,6 +131,15 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
         for _module_name, module in trainable_modules(self._module):
             # Do not add hooks to DPRNN, DPLSTM or DPGRU as the hooks are handled by the `RNNLinear`
             if type(module) in [DPRNN, DPLSTM, DPGRU]:
+                continue
+
+            if (config.dpsgd_mode == MODE_ELEGANT
+                and type(module) in [nn.GroupNorm, nn.LayerNorm]):
+                continue
+
+            if (config.dpsgd_mode == MODE_ELEGANT
+                and config.model_type == "rnn"
+                and type(module) in [nn.Conv2d, nn.Conv1d]):
                 continue
 
             self.autograd_grad_sample_hooks.append(
@@ -127,6 +167,9 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
         )(x, *args, **kwargs)
 
 
+    def forward_batch(self, x: torch.Tensor, *args, **kwargs):
+        return self._module(x, *args, **kwargs)
+
     def capture_activations_hook(
         self,
         module: nn.Module,
@@ -152,9 +195,6 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
         else:
             module.activations.append(forward_input[0].detach())  # pyre-ignore
 
-        for _, p in trainable_parameters(module):
-            p._forward_counter += 1
-
 
     def capture_backprops_hook(
         self,
@@ -164,39 +204,49 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
         loss_reduction: str,
         batch_first: bool,
     ):
+        if not self.hooks_enabled:
+            return
+
         # For reweight DP-SGD, compute norm of each parameters
         if config.dpsgd_mode == MODE_REWEIGHT:
             profiler.record("Backward weight")
             for _, p in trainable_parameters(module):
-                if p._forward_counter == 0 and p.requires_grad_opacus:
+                if p.requires_grad_opacus:
                     p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
 
                     del p.grad_sample
 
             profiler.record("Clip and reduce")
 
+        if config.dpsgd_mode == MODE_ELEGANT:
+            module.grad_outputs = [forward_output[0]]
+
+            if (type(module) == nn.Linear
+                and len(forward_output[0].shape) == 2):
+                module.weight.grad_sample_norms = \
+                    [module.activations[0].norm(2, dim=1) * forward_output[0].norm(2, dim=1)]
 
     def disable_hooks(self) -> None:
-        if self.hooks_enabled:
-            # Create requires_grad to turn-on per-batch gradient computation
-            for _, p in trainable_parameters(self._module):
-                if p.requires_grad_opacus:
-                    p.requires_grad = True
-                else:
-                    p.requires_grad = False
+        # if self.hooks_enabled:
+        #     # Create requires_grad to turn-on per-batch gradient computation
+        #     for _, p in trainable_parameters(self._module):
+        #         if p.requires_grad_opacus:
+        #             p.requires_grad = True
+        #         else:
+        #             p.requires_grad = False
 
         self.hooks_enabled = False
 
 
     def enable_hooks(self) -> None:
-        if not self.hooks_enabled:
-            # Create requires_grad_opacus to turn-off per-batch gradient computation
-            for _, p in self._module.named_parameters():
-                if p.requires_grad:
-                    p.requires_grad_opacus = True
-                else:
-                    p.requires_grad_opacus = False
+        # if not self.hooks_enabled:
+        #     # Create requires_grad_opacus to turn-off per-batch gradient computation
+        #     for _, p in self._module.named_parameters():
+        #         if p.requires_grad:
+        #             p.requires_grad_opacus = True
+        #         else:
+        #             p.requires_grad_opacus = False
 
-                p.requires_grad = False
+        #         p.requires_grad = False
         
         self.hooks_enabled = True

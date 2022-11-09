@@ -489,10 +489,16 @@ class DPOptimizer(Optimizer):
             # torch.cuda.synchronize()
             # start = time.time()
 
-            if config.model_type == "cnn" or config.model_type == "rnn":
-                output = self.module(*input)
-            if config.model_type == "transformer":
-                output = self.module(*input, return_dict=False)[0]
+            if config.grad_sample_mode == "hooks":
+                if config.model_type == "cnn" or config.model_type == "rnn":
+                    output = self.module(*input)
+                if config.model_type == "transformer":
+                    output = self.module(*input, return_dict=False)[0]
+            elif config.grad_sample_mode == "ew":
+                if config.model_type == "cnn" or config.model_type == "rnn":
+                    output = self.module.forward_batch(*input)
+                if config.model_type == "transformer":
+                    output = self.module.forward_batch(*input, return_dict=False)[0]
 
             loss = criterion(output, target)
             loss = (loss * per_sample_clip_factor).mean()

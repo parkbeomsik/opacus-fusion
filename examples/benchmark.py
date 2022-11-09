@@ -129,6 +129,7 @@ def main():  # noqa: C901
     elif args.dpsgd_mode == "elegant":
         config.dpsgd_mode = config.MODE_ELEGANT
 
+    config.grad_sample_mode = args.grad_sample_mode
     config.quantization = args.quant
 
     config.profile_value = args.profile_value
@@ -336,7 +337,8 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="sum"
+            loss_reduction="sum",
+            grad_sample_mode=config.grad_sample_mode
         )
 
     if args.architecture == "deepspeech":
@@ -667,6 +669,10 @@ def parse_args():
 
     parser.add_argument(
         "--dpsgd_mode", type=str, default="naive", help="DPSGD mode. (naive, reweight, elegant)"
+    )
+
+    parser.add_argument(
+        "--grad_sample_mode", type=str, default="hooks", help="Grad sample mode. (hooks, ew)"
     )
 
     parser.add_argument(

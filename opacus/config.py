@@ -12,6 +12,7 @@ architecture = "gnmt"
 dpsgd_mode = MODE_ELEGANT
 selective_reweight = True
 quantization = False
+grad_sample_mode = "hooks"
 
 batch_size = 0
 

@@ -176,7 +176,9 @@ class GradSampleModule(AbstractGradSampleModule):
             return self._module(*new_args, **kwargs)
         if config.model_type == "transformer":
             for name, module in trainable_modules(self):
-                if "word_embeddings" in name:
+                if ("word_embeddings" in name):
+                    # or "position_embeddings" in name
+                    # or "token_type_embeddings" in name):
                     module.requires_grad_(True)
             return self._module(*args, **kwargs)
         if config.model_type == "rnn":
@@ -411,20 +413,25 @@ class GradSampleModule(AbstractGradSampleModule):
             if p._forward_counter == 0:
                 promote_current_grad_sample(p)
 
-        if len(module.activations) == 0:
-            if hasattr(module, "max_batch_len"):
-                del module.max_batch_len
-
         # For reweight DP-SGD, compute norm of each parameters
         if config.dpsgd_mode == MODE_REWEIGHT:
             profiler.record("Backward weight")
             for _, p in trainable_parameters(module):
                 if p._forward_counter == 0 and p.requires_grad_opacus:
                     p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
+                    
+                    # For positional embeddings in transformer
+                    # print(p.grad_sample_norms[0].shape)
+                    # if p.grad_sample_norms[0].shape[0] == 1:
+                    #     p.grad_sample_norms = [p.grad_sample_norms[0].expand(module.max_batch_len)]
 
                     del p.grad_sample
 
             profiler.record("Clip and reduce")
+
+        if len(module.activations) == 0:
+            if hasattr(module, "max_batch_len"):
+                del module.max_batch_len
 
         # Keep activations for later example-wise gradient computation
         if config.dpsgd_mode == MODE_ELEGANT:
