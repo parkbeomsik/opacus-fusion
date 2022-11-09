@@ -645,7 +645,6 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
   using namespace torch::indexing;
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {1}, false);
-  std::cout << "Norm, " << norm << std::endl; 
   compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm, num_rows_to_compute);
 }
 
@@ -657,7 +656,7 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
                                 size_t end_cudnn_layer,
                                 bool quant=false) {
   
-  int batch_count = 32;
+  int batch_count = 16;
 
   printf("%s\n", cudaGetErrorName(cudaGetLastError()));
   // auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -948,8 +947,8 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     else {
       // torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
       temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
-      // temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::Contiguous);
-      // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::Contiguous);
+      // temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::ChannelsLast);
     }
 
     LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);

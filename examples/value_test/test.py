@@ -11,9 +11,9 @@ def execute_command(cmd):
         print(ret.stderr.decode())
         assert 0
 
-if not os.path.exists("value_test/value_data"):
+if not os.path.exists("value_data"):
     os.mkdir("value_data")
-if not os.path.exists("value_test/grad_sample"):
+if not os.path.exists("grad_sample"):
     os.mkdir("grad_sample")
 
 case_list = ["cnn resnet18", "cnn resnet50", "cnn resnet152"]

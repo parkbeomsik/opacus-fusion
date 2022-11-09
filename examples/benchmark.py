@@ -113,8 +113,8 @@ def print_args(args):
     print(f"Verbose          : {args.verbose}")
 
 def main():  # noqa: C901
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
+    # torch.backends.cudnn.benchmark = False
+    # torch.use_deterministic_algorithms(True)
 
     world_size = 1
 
@@ -336,8 +336,7 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="sum",
-            grad_sample_mode="hooks" if config.dpsgd_mode == config.MODE_NAIVE else "hooks"
+            loss_reduction="sum"
         )
 
     if args.architecture == "deepspeech":
