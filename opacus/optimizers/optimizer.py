@@ -1179,7 +1179,9 @@ class DPOptimizer(Optimizer):
             for name, p in self.module.named_parameters():
                 if p.requires_grad_opacus:
                     # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
-                    if len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                    if len(p.summed_grad.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                        grad_dict[name] = p.summed_grad.view_as(p)
+                    elif len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
                         N, C, H, W = p.shape
                         grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
                     else:
@@ -1205,7 +1207,9 @@ class DPOptimizer(Optimizer):
                 )
                 p.grad = (p.summed_grad + noise).view_as(p)
             else:
-                if len(p.shape) == 4:
+                if len(p.summed_grad.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                    p.grad = p.summed_grad.view_as(p)
+                elif len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
                     K, C, R, S = p.shape
                     p.grad = p.summed_grad.view([K, R, S, C]).permute(0, 3, 1, 2)
                 else:

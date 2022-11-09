@@ -171,7 +171,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_batch_desc));
     checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_batch_desc,
                                         dtype,
-                                        CUDNN_TENSOR_NHWC,
+                                        CUDNN_TENSOR_NCHW,
                                         config->K,
                                         config->C,
                                         config->R,
@@ -179,7 +179,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_batch_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        CUDNN_TENSOR_NCHW,
                                         dtype,
                                         config->N,
                                         config->C,
@@ -188,7 +188,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_batch_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        CUDNN_TENSOR_NCHW,
                                         dtype,
                                         config->N,
                                         config->K,
@@ -917,7 +917,12 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   LOG_STDERR("Split finished per-batch gradients and add to list", verbose);
   int64_t offset = 0;
   for (size_t i = 0; i < descriptors.size(); ++i) {
-    per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
+    if (i >= end_non_reweight_layer){
+      per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}).view(descriptors.at(i).filter_shape));
+    }
+    else{
+      per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
+    }
     offset += descriptors.at(i).grad_weight_per_example_size;
   }
   assert(per_batch_grads.size() == descriptors.size());
@@ -946,9 +951,9 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     }
     else {
       // torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
-      temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
-      // temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-      // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::ChannelsLast);
+      // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
+      temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::Contiguous);
+      temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::Contiguous);
     }
 
     LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);
@@ -977,7 +982,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       checkCUDNN(cudnnConvolutionBackwardFilter(cudnn_handles[i % _N_CUDA_STREAMS],
                                                 &alpha,
                                                 descriptor.input_batch_desc,
-                                                actvs.at(i).data_ptr(),
+                                                temp_actv.data_ptr(),
                                                 descriptor.output_batch_desc,
                                                 temp_ograd.data_ptr(),
                                                 descriptor.conv_desc,
@@ -988,6 +993,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                 descriptor.filter_batch_desc,
                                                 per_batch_grads.at(i).data_ptr()));
     }
+    per_batch_grads.at(i) = per_batch_grads.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
   }
   c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
   // Wait all streams to finish
