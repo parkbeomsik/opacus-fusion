@@ -11,10 +11,10 @@ def execute_command(cmd):
         print(ret.stderr.decode())
         assert 0
 
-if not os.path.exists("value_data"):
-    os.mkdir("value_data")
-if not os.path.exists("grad_sample"):
-    os.mkdir("grad_sample")
+if not os.path.exists("value_test/value_data"):
+    os.mkdir("value_test/value_data")
+if not os.path.exists("value_test/grad_sample"):
+    os.mkdir("value_test/grad_sample")
 
 def test(model_type, architecture, dpsgd_mode, grad_sample_mode):
     print(f"Execute {dpsgd_mode} ({grad_sample_mode})...")
