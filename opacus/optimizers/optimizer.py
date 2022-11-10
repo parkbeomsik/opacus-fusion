@@ -530,41 +530,14 @@ class DPOptimizer(Optimizer):
                             input_W = layer.activations[0].shape[3]
                             break
 
-                    self._trainable_modules_cache = list(trainable_modules(self.module))
-
-                    self.conv_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.Conv2d):
-                            self.conv_list.append(layer)
-
-                    self.linear_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.Linear):
-                            self.linear_list.append(layer)
-
-                    self.group_norm_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.GroupNorm):
-                            self.group_norm_list.append(layer)          
-
-                    # Function to compute k/mn of conv layer
-                    def compute_k_mn(layer):
-                        C = layer.activations[0].shape[1]
-                        K = layer.grad_outputs[0].shape[1]
-                        R = layer.kernel_size[0]
-                        S = layer.kernel_size[1]
-                        P = layer.grad_outputs[0].shape[2]
-                        Q = layer.grad_outputs[0].shape[3]
-                        return P*Q/(K*C*R*S)
-
-                    # self.conv_list.sort(key=compute_k_mn, reverse=True)
+                    # print(input_H, input_W)
 
                     if input_H * input_W < 32*32 + 1:
                         split_k_size = 1024
                     else:
                         split_k_size = 224*224+1 # 112*112 + 1
 
-                    for layer in self.conv_list:
+                    for name, layer in trainable_modules(self.module):
                         if isinstance(layer, nn.Conv2d):
                             self.batch_size = layer.activations[0].shape[0]
                             N = layer.activations[0].shape[0]
@@ -585,7 +558,24 @@ class DPOptimizer(Optimizer):
                                                                                 dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
                             # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
                             # print(f"{i} {'x'.join(args)}")
-                            # i += 1   
+                            # i += 1
+
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.conv_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Conv2d):
+                            self.conv_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            self.linear_list.append(layer)
+
+                    self.group_norm_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.GroupNorm):
+                            self.group_norm_list.append(layer)             
 
                     self.first_run = False
 
@@ -1189,6 +1179,22 @@ class DPOptimizer(Optimizer):
 
                     layer.activations = []
 
+        # Save gradients
+        if config.grad_save_path:
+            grad_dict = {}
+            for name, p in self.module.named_parameters():
+                if p.requires_grad_opacus:
+                    # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+                    if len(p.summed_grad.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                        grad_dict[name] = p.summed_grad.view_as(p)
+                    elif len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+                        N, C, H, W = p.shape
+                        grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
+                    else:
+                        grad_dict[name] = p.summed_grad.view_as(p)
+                    # print(p.summed_grad.view_as(p).stride())
+            torch.save(grad_dict, config.grad_save_path)
+
 
     def add_noise(self):
         """
@@ -1226,11 +1232,9 @@ class DPOptimizer(Optimizer):
         Does nothing if ``loss_reduction="sum"``. Divides gradients by
         ``self.expected_batch_size`` if ``loss_reduction="mean"``
         """
-        if (config.dpsgd_mode == MODE_NAIVE
-            or config.dpsgd_mode == MODE_REWEIGHT):
-            if self.loss_reduction == "mean":
-                for p in self.params:
-                    p.grad /= self.expected_batch_size * self.accumulated_iterations
+        if self.loss_reduction == "mean":
+            for p in self.params:
+                p.grad /= self.expected_batch_size * self.accumulated_iterations
 
     def zero_grad(self, set_to_none: bool = False):
         """
@@ -1285,20 +1289,9 @@ class DPOptimizer(Optimizer):
             return False
 
         self.add_noise()
-        
-        profiler.record("Add noise")
         self.scale_grad()
 
-        profiler.record("Clip/reduce")
-
-        # Save gradients
-        if config.grad_save_path:
-            grad_dict = {}
-            for name, p in self.module.named_parameters():
-                if p.requires_grad_opacus:
-                    grad_dict[name] = p.grad
-                    # print(p.summed_grad.view_as(p).stride())
-            torch.save(grad_dict, config.grad_save_path)
+        profiler.record("Add noise")
 
         if self.step_hook:
             self.step_hook(self)

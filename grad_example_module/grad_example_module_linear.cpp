@@ -416,7 +416,6 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     // Compute scaling factor
     compute_single_scaling_factor((float *)scaling_factors.index({example_idx}).data_ptr(), 
                                   partial_per_example_gradient, max_norm);
-    scaling_factors.index({Slice(example_idx, example_idx + 1)}).div_(batch_count);
 
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate

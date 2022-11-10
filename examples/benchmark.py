@@ -337,12 +337,12 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="mean",
+            loss_reduction="sum",
             grad_sample_mode=config.grad_sample_mode
         )
 
     if args.architecture == "deepspeech":
-        criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+        criterion = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
         def criterion_func(output, target):
             return criterion(output[0], target, output[1], 
                              torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
@@ -351,8 +351,8 @@ def main():  # noqa: C901
             return criterion_non_reduction(output[0], target, output[1], 
                                            torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
     else:
-        criterion_func = nn.CrossEntropyLoss(reduction="mean")
-        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="mean")
+        criterion_func = nn.CrossEntropyLoss(reduction="sum")
+        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="sum")
 
     model.train()
     print(model)
@@ -439,11 +439,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
             else:
                 with open(args.log_file, "w") as f:
                     f.write("Config,Throughput (#example/s)\n")
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
 
     if config.profile_time and not config.profile_throughput:
         print("==============================================================================================")
@@ -457,11 +457,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
 
     if config.profile_memory:
@@ -477,11 +477,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.grad_sample_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
                     f.write(row)
 
 def parse_args():
