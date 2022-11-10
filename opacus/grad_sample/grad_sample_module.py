@@ -65,18 +65,18 @@ def create_or_accumulate_grad_sample(
             # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
             # gc.collect()
             profiler.record("Backward weight")
-            zero = PerSampleGrads(torch.zeros(
-                torch.Size([max_batch_len]) + grad_sample.shape[1:],
-                device=grad_sample.device,
-                dtype=grad_sample.dtype,
-            ))
-            profiler.record_memory()
-            param._current_grad_sample = zero
+            # zero = PerSampleGrads(torch.zeros(
+            #     torch.Size([max_batch_len]) + grad_sample.shape[1:],
+            #     device=grad_sample.device,
+            #     dtype=grad_sample.dtype,
+            # ))
+            # profiler.record_memory()
+            # param._current_grad_sample = zero
             
-            param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
+            # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
             profiler.record("Clip/reduce")
             
-            # param._current_grad_sample = grad_sample
+            param._current_grad_sample = grad_sample
 
 
 def promote_current_grad_sample(p: nn.Parameter) -> None:
@@ -518,7 +518,10 @@ class GradSampleModule(AbstractGradSampleModule):
 
         n = module.max_batch_len
         if loss_reduction == "mean":
-            backprops = backprops * n
+            if is_rnn:
+                backprops = list(map(lambda x: x*n, backprops))
+            else:
+                backprops = backprops * n
         elif loss_reduction == "sum":
             backprops = backprops
         else:

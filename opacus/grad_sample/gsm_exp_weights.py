@@ -142,9 +142,10 @@ class GradSampleModuleExpandedWeights(AbstractGradSampleModule):
                 and type(module) in [nn.Conv2d, nn.Conv1d]):
                 continue
 
-            self.autograd_grad_sample_hooks.append(
-                module.register_forward_hook(self.capture_activations_hook)
-            )
+            if config.dpsgd_mode == MODE_ELEGANT:
+                self.autograd_grad_sample_hooks.append(
+                    module.register_forward_hook(self.capture_activations_hook)
+                )
 
             self.autograd_grad_sample_hooks.append(
                 module.register_backward_hook(
