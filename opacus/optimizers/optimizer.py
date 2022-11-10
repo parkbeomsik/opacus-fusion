@@ -530,14 +530,41 @@ class DPOptimizer(Optimizer):
                             input_W = layer.activations[0].shape[3]
                             break
 
-                    # print(input_H, input_W)
+                    self._trainable_modules_cache = list(trainable_modules(self.module))
+
+                    self.conv_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Conv2d):
+                            self.conv_list.append(layer)
+
+                    self.linear_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.Linear):
+                            self.linear_list.append(layer)
+
+                    self.group_norm_list = []
+                    for name, layer in self._trainable_modules_cache:
+                        if isinstance(layer, nn.GroupNorm):
+                            self.group_norm_list.append(layer)          
+
+                    # Function to compute k/mn of conv layer
+                    def compute_k_mn(layer):
+                        C = layer.activations[0].shape[1]
+                        K = layer.grad_outputs[0].shape[1]
+                        R = layer.kernel_size[0]
+                        S = layer.kernel_size[1]
+                        P = layer.grad_outputs[0].shape[2]
+                        Q = layer.grad_outputs[0].shape[3]
+                        return P*Q
+
+                    self.conv_list.sort(key=compute_k_mn, reverse=True)
 
                     if input_H * input_W < 32*32 + 1:
                         split_k_size = 1024
                     else:
                         split_k_size = 224*224+1 # 112*112 + 1
 
-                    for name, layer in trainable_modules(self.module):
+                    for layer in self.conv_list:
                         if isinstance(layer, nn.Conv2d):
                             self.batch_size = layer.activations[0].shape[0]
                             N = layer.activations[0].shape[0]
@@ -555,27 +582,10 @@ class DPOptimizer(Optimizer):
                             # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
-                                                                                dilation_h, dilation_w, int(P*Q/split_k_size)+1)) # int(P*Q/split_k_size)+
+                                                                                dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
                             # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
                             # print(f"{i} {'x'.join(args)}")
-                            # i += 1
-
-                    self._trainable_modules_cache = list(trainable_modules(self.module))
-
-                    self.conv_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.Conv2d):
-                            self.conv_list.append(layer)
-
-                    self.linear_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.Linear):
-                            self.linear_list.append(layer)
-
-                    self.group_norm_list = []
-                    for name, layer in self._trainable_modules_cache:
-                        if isinstance(layer, nn.GroupNorm):
-                            self.group_norm_list.append(layer)             
+                            # i += 1   
 
                     self.first_run = False
 

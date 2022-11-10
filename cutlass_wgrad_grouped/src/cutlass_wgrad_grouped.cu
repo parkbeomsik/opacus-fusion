@@ -294,7 +294,7 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
         }
     }
 
-    std::cout << best_operation.operation->name << "( " << min_runtime_ms << " ms )" << std::endl;
+    std::cout << best_operation.operation->name << "( " << min_runtime_ms / 20 << " ms )" << std::endl;
 
     return best_operation;
 }
