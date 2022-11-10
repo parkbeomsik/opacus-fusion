@@ -1180,20 +1180,20 @@ class DPOptimizer(Optimizer):
                     layer.activations = []
 
         # Save gradients
-        if config.grad_save_path:
-            grad_dict = {}
-            for name, p in self.module.named_parameters():
-                if p.requires_grad_opacus:
-                    # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
-                    if len(p.summed_grad.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
-                        grad_dict[name] = p.summed_grad.view_as(p)
-                    elif len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
-                        N, C, H, W = p.shape
-                        grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
-                    else:
-                        grad_dict[name] = p.summed_grad.view_as(p)
-                    # print(p.summed_grad.view_as(p).stride())
-            torch.save(grad_dict, config.grad_save_path)
+        # if config.grad_save_path:
+        #     grad_dict = {}
+        #     for name, p in self.module.named_parameters():
+        #         if p.requires_grad_opacus:
+        #             # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+        #             if len(p.summed_grad.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+        #                 grad_dict[name] = p.summed_grad.view_as(p)
+        #             elif len(p.shape) == 4 and config.dpsgd_mode == MODE_ELEGANT:
+        #                 N, C, H, W = p.shape
+        #                 grad_dict[name] = p.summed_grad.view([N, H, W, C]).permute(0, 3, 1, 2)
+        #             else:
+        #                 grad_dict[name] = p.summed_grad.view_as(p)
+        #             # print(p.summed_grad.view_as(p).stride())
+        #     torch.save(grad_dict, config.grad_save_path)
 
 
     def add_noise(self):
@@ -1292,6 +1292,16 @@ class DPOptimizer(Optimizer):
         self.scale_grad()
 
         profiler.record("Add noise")
+
+        # Save gradients
+        if config.grad_save_path:
+            grad_dict = {}
+            for name, p in self.module.named_parameters():
+                if p.requires_grad_opacus:
+                    # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+                    grad_dict[name] = p.grad
+                    # print(p.summed_grad.view_as(p).stride())
+            torch.save(grad_dict, config.grad_save_path)
 
         if self.step_hook:
             self.step_hook(self)
