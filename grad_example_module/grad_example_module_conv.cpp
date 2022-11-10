@@ -79,6 +79,7 @@ cutlass_wgrad_grouped::OperationWithWorkspace best_operation_with_workspace;
 
 int num_rows_to_compute = 4;
 
+bool use_nchw = true;
 bool reweight_nchw = true;
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -146,7 +147,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_desc));
     checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_desc,
                                         dtype,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         config->K,
                                         config->C,
                                         config->R,
@@ -154,7 +155,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->C,
@@ -163,7 +164,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->K,
@@ -735,13 +736,25 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   float add_noise_ms = 0.0;
 
   // convert to nchw -> nhwc
-  // for (size_t i = 0; i < actvs.size(); ++i) {
-  //   if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
-  //     c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
-  //     // actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-  //     ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-  //   }
-  // }
+  for (size_t i = 0; i < actvs.size(); ++i) {
+    if (i < end_cudnn_layer) {
+      if (use_nchw) {
+        if (! ograds.at(i).is_contiguous(c10::MemoryFormat::Contiguous)) {
+          ograds.at(i).contiguous(c10::MemoryFormat::Contiguous);
+        }
+      }
+      else {
+        if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
+          ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+        }
+      }
+    }
+    else {
+      if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
+        ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      }
+    }
+  }
   c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
   // printf("1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   auto partial_per_example_gradient = torch::empty({num_rows_to_compute, (int64_t)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -867,7 +880,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
         partial_per_batch_gradient.add_(non_reweight_partial_per_example.sum({0}));
       }
       else {
-        partial_per_batch_gradient.add_(partial_per_example_gradient.index({Slice(0, (int64_t)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
+        partial_per_batch_gradient.add_(partial_per_example_gradient.index({0, Slice(0, (int64_t)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
       }
 
       // torch::cuda::synchronize();
@@ -1119,7 +1132,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     auto min_runtime_us = std::chrono::microseconds(1000000000);
     auto prev_runtime_us = std::chrono::microseconds(1000000000);
     auto increase_count = 0;
-    for (size_t end_cudnn_layer = (quant? 1 : 1); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) { // FIXME
+    for (size_t end_cudnn_layer = (quant? 1 : 0); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) { // FIXME
       // Initialize cutlass_wgrad_grouped library
       if (quant) {
         cudaDeviceProp deviceProp;

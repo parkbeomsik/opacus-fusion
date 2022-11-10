@@ -63,3 +63,8 @@ deepspeech_256x256_64_elegant_hooks_no,45.418543215835
 gnmt_256x256_8_naive_hooks_no,8.90555122594147
 gnmt_256x256_16_reweight_hooks_no,7.37122201410552
 gnmt_256x256_16_elegant_hooks_no,14.42983479632281
+
+
+
+resnet18_32x32_16384_elegant_hooks_no,4753.934394641311
+resnet50_32x32_4096_elegant_hooks_no,1881.6323379454234

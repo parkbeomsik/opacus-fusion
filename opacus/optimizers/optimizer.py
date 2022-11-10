@@ -1293,6 +1293,7 @@ class DPOptimizer(Optimizer):
 
         # Save gradients
         if config.grad_save_path:
+            print("Save grad_save_path!")
             grad_dict = {}
             for name, p in self.module.named_parameters():
                 if p.requires_grad_opacus:
