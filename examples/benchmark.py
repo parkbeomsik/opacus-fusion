@@ -439,11 +439,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode},{throughput}\n")
             else:
                 with open(args.log_file, "w") as f:
                     f.write("Config,Throughput (#example/s)\n")
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode},{throughput}\n")
 
     if config.profile_time and not config.profile_throughput:
         print("==============================================================================================")
@@ -457,11 +457,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
                     f.write(row)
 
     if config.profile_memory:
@@ -477,11 +477,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
                     f.write(row)
 
 def parse_args():
