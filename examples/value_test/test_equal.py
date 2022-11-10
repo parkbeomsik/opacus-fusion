@@ -43,6 +43,6 @@ def is_equal(path_1, path_2, verbose=True):
     return equal
 
 if __name__ == "__main__":
-    is_equal("value_test/value_data/resnet18_grad_ref.pt",
-             "value_test/value_data/resnet18_grad_elegant_hooks.pt", True)
+    is_equal("value_test/value_data/resnet152_grad_naive.pt",
+             "value_test/value_data/resnet152_grad_elegant.pt", True)
             
