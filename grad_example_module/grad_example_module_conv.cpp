@@ -640,12 +640,13 @@ void compute_single_scaling_factor(torch::Tensor& scaling_factors,
                                    int example_idx,
                                    const torch::Tensor partial_per_example_gradient,
                                    std::vector<torch::Tensor>& precomputed_per_example_grad_norms,
-                                   float max_norm) {
+                                   float max_norm,
+                                   int scale_loss) {
   
   using namespace torch::indexing;
 
   torch::Tensor norm = torch::frobenius_norm(partial_per_example_gradient, {1}, false);
-  compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm, num_rows_to_compute);
+  compute_scaling_factor_cuda((float *)scaling_factors.index({example_idx}).data_ptr(), (float *)norm.data_ptr(), max_norm, num_rows_to_compute, scale_loss);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -716,6 +717,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                                   std::vector<torch::Tensor>& linear_ograds,
                                                                   size_t end_non_reweight_layer,
                                                                   size_t end_cudnn_layer,
+                                                                  bool loss_reduction_mean = false,
                                                                   int batch_count = 0,
                                                                   float max_norm = 1.0,
                                                                   float noise_multiplier = 1.0,
@@ -785,6 +787,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   // printf("2 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // auto partial_per_example_gradient_decoded = torch::zeros({(int)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
   auto per_batch_gradient = torch::zeros({(int64_t)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)non_reweight_per_example_gradient_size)});
 
   // Workspace to store scaling factors
   auto scaling_factors = torch::empty({batch_count}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -843,7 +846,7 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     LOG_STDERR("Compute scaling factor", verbose);
     // Compute scaling factor
     compute_single_scaling_factor(scaling_factors, example_idx,
-                                  partial_per_example_gradient, precomputed_per_example_grad_norms, max_norm);
+                                  partial_per_example_gradient, precomputed_per_example_grad_norms, max_norm, loss_reduction_mean ? batch_count : 1);
     // torch::cuda::synchronize();
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate
@@ -856,10 +859,14 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
       //                         1,
       //                         (float *)per_batch_gradient.data_ptr(),
       //                         1));
-      auto non_reweight_partial_per_example = partial_per_example_gradient.index({Slice(), Slice(0, (int)non_reweight_per_example_gradient_size)});
-      non_reweight_partial_per_example.mul_(scaling_factors.index({Slice(example_idx, example_idx + num_rows_to_compute)}).view({num_rows_to_compute, 1}));
-      auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)non_reweight_per_example_gradient_size)});
-      partial_per_batch_gradient.add_(non_reweight_partial_per_example.sum({0}));
+      if (num_rows_to_compute > 1) {
+        auto non_reweight_partial_per_example = partial_per_example_gradient.index({Slice(), Slice(0, (int)non_reweight_per_example_gradient_size)});
+        non_reweight_partial_per_example.mul_(scaling_factors.index({Slice(example_idx, example_idx + num_rows_to_compute)}).view({num_rows_to_compute, 1}));
+        partial_per_batch_gradient.add_(non_reweight_partial_per_example.sum({0}));
+      }
+      else {
+        partial_per_batch_gradient.add_(partial_per_example_gradient.index({0, Slice(0, (int64_t)non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
+      }
 
       // torch::cuda::synchronize();
       // std::cout << "partial_per_batch" << partial_per_batch_gradient.index({Slice(0, 10)}) << std::endl;
@@ -1057,6 +1064,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                           std::vector<torch::Tensor>& precomputed_per_example_grad_norms,
                                           std::vector<torch::Tensor>& linear_actvs,
                                           std::vector<torch::Tensor>& linear_ograds,
+                                          bool loss_reduction_mean,
                                           int batch_count,
                                           float max_norm,
                                           float noise_multiplier,
@@ -1240,6 +1248,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             linear_ograds,
                                             end_non_reweight_layer,
                                             best_end_cudnn_layer,
+                                            loss_reduction_mean,
                                             batch_count,
                                             max_norm,
                                             noise_multiplier,
@@ -1263,6 +1272,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                             linear_ograds,
                                             end_non_reweight_layer,
                                             best_end_cudnn_layer,
+                                            loss_reduction_mean,
                                             batch_count,
                                             max_norm,
                                             noise_multiplier,
@@ -1360,6 +1370,7 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
                                     linear_ograds,
                                     best_end_non_reweight_layer,
                                     best_end_cudnn_layer,
+                                    loss_reduction_mean,
                                     batch_count,
                                     max_norm,
                                     noise_multiplier,

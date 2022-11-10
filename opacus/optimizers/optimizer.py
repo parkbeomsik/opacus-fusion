@@ -555,7 +555,7 @@ class DPOptimizer(Optimizer):
                             # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
-                                                                                dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
+                                                                                dilation_h, dilation_w, int(P*Q/split_k_size)+1)) # int(P*Q/split_k_size)+
                             # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
                             # print(f"{i} {'x'.join(args)}")
                             # i += 1
@@ -612,12 +612,14 @@ class DPOptimizer(Optimizer):
                 # print(f"Peak memory usage = {torch.cuda.max_memory_allocated()}")
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
-                    grad_example_module.get_clip_and_reduced_grads_conv(self.configs, activations, grad_outputs,
-                                                                precomputed_grads, precomputed_norms,
-                                                                linear_activations, linear_grad_outputs,
-                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier,
-                                                                config.quantization, 
-                                                                config.verbose, config.profile_time, config.profile_memory)
+                    grad_example_module.get_clip_and_reduced_grads_conv(
+                        self.configs, activations, grad_outputs,
+                        precomputed_grads, precomputed_norms,
+                        linear_activations, linear_grad_outputs,
+                        self.loss_reduction == "mean",
+                        self.batch_size, self.max_grad_norm, self.noise_multiplier,
+                        config.quantization, 
+                        config.verbose, config.profile_time, config.profile_memory)
 
                 # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
@@ -1232,9 +1234,11 @@ class DPOptimizer(Optimizer):
         Does nothing if ``loss_reduction="sum"``. Divides gradients by
         ``self.expected_batch_size`` if ``loss_reduction="mean"``
         """
-        if self.loss_reduction == "mean":
-            for p in self.params:
-                p.grad /= self.expected_batch_size * self.accumulated_iterations
+        if (config.dpsgd_mode == MODE_NAIVE 
+            or config.dpsgd_mode == MODE_REWEIGHT):
+            if self.loss_reduction == "mean":
+                for p in self.params:
+                    p.grad /= self.expected_batch_size * self.accumulated_iterations
 
     def zero_grad(self, set_to_none: bool = False):
         """

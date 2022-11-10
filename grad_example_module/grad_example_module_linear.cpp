@@ -282,13 +282,14 @@ void compute_per_batch_gradient_embedding(std::vector<torch::Tensor>& per_batch_
 
 void compute_single_scaling_factor(float * scaling_factor_out,
                                    const torch::Tensor partial_per_example_gradient,
-                                   float max_norm) {
+                                   float max_norm,
+                                   int scale_loss) {
   
   using namespace torch::indexing;
 
   auto norm = torch::frobenius_norm(partial_per_example_gradient, {0}, false);
 
-  compute_scaling_factor_cuda(scaling_factor_out, (float *)norm.data_ptr(), max_norm);
+  compute_scaling_factor_cuda(scaling_factor_out, (float *)norm.data_ptr(), max_norm, scale_loss);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -305,6 +306,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
                                     std::vector<torch::Tensor>& embedding_ograds,
                                     std::vector<int>& embedding_vocab_sizes,
                                     size_t end_non_reweight_layer,
+                                    bool loss_reduction_mean = false,
                                     int batch_count = 0,
                                     float max_norm = 1.0,
                                     float noise_multiplier = 1.0,
@@ -415,7 +417,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     LOG_STDERR("Compute scaling factor", verbose);
     // Compute scaling factor
     compute_single_scaling_factor((float *)scaling_factors.index({example_idx}).data_ptr(), 
-                                  partial_per_example_gradient, max_norm);
+                                  partial_per_example_gradient, max_norm, loss_reduction_mean ? batch_count : 1);
 
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate
@@ -634,6 +636,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
                                             std::vector<torch::Tensor>& embedding_actvs,
                                             std::vector<torch::Tensor>& embedding_ograds,
                                             std::vector<int>& embedding_vocab_sizes,
+                                            bool loss_reduction_mean,
                                             int batch_count,
                                             float max_norm,
                                             float noise_multiplier,
@@ -690,6 +693,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
                                               embedding_ograds,
                                               embedding_vocab_sizes,
                                               end_non_reweight_layer,
+                                              loss_reduction_mean,
                                               batch_count,
                                               max_norm,
                                               noise_multiplier,
@@ -715,6 +719,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
                                               embedding_ograds,
                                               embedding_vocab_sizes,
                                               end_non_reweight_layer,
+                                              loss_reduction_mean,
                                               batch_count,
                                               max_norm,
                                               noise_multiplier,
@@ -779,6 +784,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
                                       embedding_ograds,
                                       embedding_vocab_sizes,
                                       Linear::best_end_non_reweight_layer,
+                                      loss_reduction_mean,
                                       batch_count,
                                       max_norm,
                                       noise_multiplier,

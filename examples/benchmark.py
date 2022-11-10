@@ -337,12 +337,12 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="sum",
+            loss_reduction="mean",
             grad_sample_mode=config.grad_sample_mode
         )
 
     if args.architecture == "deepspeech":
-        criterion = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
+        criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
         def criterion_func(output, target):
             return criterion(output[0], target, output[1], 
                              torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
@@ -351,8 +351,8 @@ def main():  # noqa: C901
             return criterion_non_reduction(output[0], target, output[1], 
                                            torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
     else:
-        criterion_func = nn.CrossEntropyLoss(reduction="sum")
-        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="sum")
+        criterion_func = nn.CrossEntropyLoss(reduction="mean")
+        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="mean")
 
     model.train()
     print(model)
