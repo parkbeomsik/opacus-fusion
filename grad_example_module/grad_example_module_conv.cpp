@@ -21,7 +21,7 @@
 #include "utils.h"
 #include "add_noise.h"
 
-#define THRESHOLD_INCREASE_COUNT_NON_CUDNN 4
+#define THRESHOLD_INCREASE_COUNT_NON_CUDNN 5
 #define THRESHOLD_INCREASE_COUNT_NON_REWEIGHT 10
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -105,10 +105,13 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     num_rows_to_compute = 16;
   }
   else if ((configs.at(0).H > 32) && configs.size() <= 40) {
-    num_rows_to_compute = 1;
+    num_rows_to_compute = 2;
   }
   else if((configs.at(0).H <= 32) && configs.size() <= 70) {
     num_rows_to_compute = 4;
+  } 
+  else if((configs.at(0).H > 32) && configs.size() <= 70) {
+    num_rows_to_compute = 1;
   } 
   else { 
     num_rows_to_compute = 1;
@@ -485,16 +488,17 @@ void set_cutlass_best_operation(size_t end_cudnn_layer,
                                 std::vector<torch::Tensor>& ograds,
                                 bool quant=false,
                                 bool test=true) {
-  printf("set_cutlass_best_operation start %d %d\n", descriptors.size(), end_cudnn_layer);
+  // printf("set_cutlass_best_operation start %d %d\n", descriptors.size(), end_cudnn_layer);
   if (descriptors.size() - end_cudnn_layer == 0) {
     return;
   }
   // torch::cuda::synchronize();
-  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  // printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  auto error = cudaGetLastError();
   // auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  printf("Alloc partial_per_example_gradient\n"); 
+  // printf("Alloc partial_per_example_gradient\n"); 
   auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int64_t)partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
-  printf("partial_per_example_gradient\n");
+  // printf("partial_per_example_gradient\n");
   // Set CUTLASS device pointers 
   std::vector<void *> wgrads_ptrs;
   for (int row = 0; row < num_rows_to_compute; ++row) {
@@ -507,7 +511,7 @@ void set_cutlass_best_operation(size_t end_cudnn_layer,
       // }
     }
   }
-  printf("set_cutlass_device_ptrs\n");
+  // printf("set_cutlass_device_ptrs\n");
   if (quant) {
     set_cutlass_device_ptrs<int8_t>(end_cudnn_layer, batch_size, actvs, ograds, wgrads_ptrs, wgrads_ptrs);
   }
@@ -665,11 +669,12 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
   
   int batch_count = 16;
 
-  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  // printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  auto error = cudaGetLastError();
   // auto _a = torch::zeros({1}, torch::TensorOptions().device(torch::kCUDA, 0));
   auto partial_per_example_gradient = torch::zeros({num_rows_to_compute, (int64_t)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
   // auto partial_per_example_gradient2 = torch::zeros({(int)partial_per_example_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
-  printf("partial_per_example_gradient\n");
+  // printf("partial_per_example_gradient\n");
   
   std::vector<void *> wgrads_ptrs;
   // Set CUTLASS device pointers
@@ -681,7 +686,7 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
         wgrads_ptr += descriptors.at(i).grad_weight_per_example_size; 
       }
     }
-    printf("set_cutlass_device_ptrs\n");
+    // printf("set_cutlass_device_ptrs\n");
     if (quant) {
       set_cutlass_device_ptrs<int8_t>(end_cudnn_layer, batch_count, actvs, ograds, wgrads_ptrs, wgrads_ptrs);
     }
@@ -690,7 +695,8 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
     }
     // checkCudaErrors(cudaDeviceSynchronize());
   }
-  printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  // printf("%s\n", cudaGetErrorName(cudaGetLastError()));
+  auto error2 = cudaGetLastError();
   // torch::cuda::synchronize();
   // checkCudaErrors(cudaDeviceSynchronize());
   // sleep(10); 
@@ -705,9 +711,9 @@ void benchmark_cudnn_and_cutlass(std::vector<torch::Tensor>& actvs,
 
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
 
-    // checkCudaErrors(cudaDeviceSynchronize());
+    checkCudaErrors(cudaDeviceSynchronize());
 
-    torch::cuda::synchronize();
+    // torch::cuda::synchronize();
   }
 }
 
@@ -843,10 +849,10 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     // Compute wgrad of back layers using CUTLASS
     compute_single_per_example_gradient_cutlass(descriptors, end_cudnn_layer, batch_count, example_idx);
 
-    for (size_t i=0; i < end_cudnn_layer; ++i) {
+    for (size_t i=0; i < std::min(end_cudnn_layer, (size_t)_N_CUDA_STREAMS); ++i) {
       checkCudaErrors(cudaEventRecord(events[i], NULL));
     }
-    for (size_t i=0; i < end_cudnn_layer; ++i) {
+    for (size_t i=0; i < std::min(end_cudnn_layer, (size_t)_N_CUDA_STREAMS); ++i) {
       checkCudaErrors(cudaStreamWaitEvent(cuda_streams[i], events[i], 0));
     }
 
@@ -856,10 +862,10 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                             precomputed_per_example_norms.index({Slice(example_idx, example_idx + num_rows_to_compute)}));
 
     // Wait all streams to finish
-    for (size_t i=0; i < end_cudnn_layer; ++i) {
+    for (size_t i=0; i < std::min(end_cudnn_layer, (size_t)_N_CUDA_STREAMS); ++i) {
       checkCudaErrors(cudaEventRecord(events[i], cuda_streams[i]));
     }
-    for (size_t i=0; i < end_cudnn_layer; ++i) {
+    for (size_t i=0; i < std::min(end_cudnn_layer, (size_t)_N_CUDA_STREAMS); ++i) {
       checkCudaErrors(cudaStreamWaitEvent(NULL, events[i], 0));
     }
 
@@ -1152,6 +1158,12 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     auto prev_runtime_us = std::chrono::microseconds(1000000000);
     auto increase_count = 0;
     for (size_t end_cudnn_layer = (quant? 1 : 0); end_cudnn_layer < configs.size() + 1; ++end_cudnn_layer) { // FIXME
+      if (end_cudnn_layer < configs.size()) {
+        if (configs.at(end_cudnn_layer).P * configs.at(end_cudnn_layer).Q > 1024) {
+          continue;
+        }
+      }
+
       // Initialize cutlass_wgrad_grouped library
       if (quant) {
         cudaDeviceProp deviceProp;
@@ -1238,7 +1250,6 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
       std::string copyOfStr = stringStream.str();
       LOG_STDERR(copyOfStr, true);
     }
-    set_cudnn_workspace(best_end_cudnn_layer); 
 
     // Initialize cutlass_wgrad_grouped library
     if (quant) {
@@ -1251,12 +1262,16 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     else {
       cutlass_wgrad_grouped::initialize_float(); 
     }
+    
+    set_cudnn_workspace(best_end_cudnn_layer); 
     // printf("a Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
     // Set cutlass workspace with best end-cudnn-layer
     set_cutlass_workspace(best_end_cudnn_layer, batch_count, quant);
 
     // Set cutlass best operation with best end-cudnn-layer
     set_cutlass_best_operation(best_end_cudnn_layer, batch_count, actvs, ograds, quant);
+
+    benchmark_cudnn_and_cutlass(actvs, ograds, best_end_cudnn_layer, quant); 
 
     ///////////////////////////////////////////////////////////////////////////////////
     
@@ -1269,7 +1284,11 @@ ReturnType get_clip_and_reduced_grads_conv(std::vector<Conv2dConfig> &configs,
     increase_count = 0;
     // printf("b Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
     // Profile to find best end-non-reweight-layer
-    for (size_t end_non_reweight_layer = 0; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) { // FIXME
+    size_t start_end_non_reweight_layer = 0;
+    if (configs.at(0).H >= 224) {
+      start_end_non_reweight_layer = configs.size() / 2;
+    }
+    for (size_t end_non_reweight_layer = start_end_non_reweight_layer; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) { // FIXME
 
       // Compute non-reweight per-example gradient size
       non_reweight_per_example_gradient_size = 0;

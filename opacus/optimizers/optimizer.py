@@ -581,10 +581,10 @@ class DPOptimizer(Optimizer):
                             dilation_h, dilation_w = layer.dilation
                             print(P*Q, K, C*R*S)
                             # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
-                            if P*Q > 32 * 32:
+                            if P*Q > 512:
                                 split_k_slices = 1
                             else:
-                                split_k_slices = int(P*Q/128) + 1
+                                split_k_slices = int(P*Q/512) + 1
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
                                                                                 dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
