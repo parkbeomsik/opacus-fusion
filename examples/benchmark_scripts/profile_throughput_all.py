@@ -53,7 +53,7 @@ rnn_experiments = [
     # ("rnn", "gnmt", "512"),
 ]
 
-experiments = cnn_experiments
+experiments = cnn_experiments + transformer_experiments + rnn_experiments
 algos = ["naive", "reweight", "elegant"]
 grad_sample_modes = ["hooks", "ew"]
 
@@ -75,7 +75,7 @@ for case in experiments:
 
     batch_size = batch_size_dict[" ".join((model_type, architecture, input_size, algo, grad_sample_mode))]
 
-    args = f"nice -n 10 taskset -c 0-20 python benchmark.py --steps 100 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} {'--quant' if quant else ''} --batch_size {batch_size} --profile_throughput --grad_sample_mode {grad_sample_mode} --log_file {LOG_FILE_NAME}"
+    args = f"nice -n 10 taskset -c 0-80 python benchmark.py --steps 10 --input_size {input_size} --architecture {architecture} --model_type {model_type} --dpsgd_mode {algo} {'--quant' if quant else ''} --batch_size {batch_size} --profile_throughput --grad_sample_mode {grad_sample_mode} --log_file {LOG_FILE_NAME}"
     print(args)
     ret = subprocess.run(args, shell=True)
     return_code = ret.returncode

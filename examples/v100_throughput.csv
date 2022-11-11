@@ -1,0 +1,3 @@
+Config,Throughput (#example/s)
+resnet152_32x32_512_reweight_no_hooks,292.511766792561
+resnet152_32x32_512_reweight_no_hooks,292.1853634250312

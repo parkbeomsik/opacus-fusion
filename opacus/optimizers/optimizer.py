@@ -789,6 +789,7 @@ class DPOptimizer(Optimizer):
                                                                 precomputed_grads, precomputed_norms,
                                                                 linear_last_activations, linear_last_grad_outputs,
                                                                 embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                                                                self.loss_reduction == "mean",
                                                                 self.batch_size, self.max_grad_norm, self.noise_multiplier,
                                                                 config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
@@ -1068,6 +1069,7 @@ class DPOptimizer(Optimizer):
                                                                 precomputed_grads, precomputed_norms,
                                                                 linear_last_activations, linear_last_grad_outputs,
                                                                 embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                                                                self.loss_reduction == "mean",
                                                                 self.batch_size, self.max_grad_norm, self.noise_multiplier, config.quantization, 
                                                                 config.verbose, config.profile_time, config.profile_memory)
 

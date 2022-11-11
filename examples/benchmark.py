@@ -202,9 +202,9 @@ def main():  # noqa: C901
         )
 
     if args.model_type == "transformer":
-        input_ids = torch.randint(0, 20000, (B, args.input_size)).type(torch.long)
-        attention_mask = torch.randint(1, 2, (B, args.input_size)).type(torch.long)
-        token_type_ids = torch.randint(0, 1, (B, args.input_size)).type(torch.long)
+        input_ids = torch.randint(0, 20000, (args.input_size,)).type(torch.long)
+        attention_mask = torch.randint(1, 2, (args.input_size,)).type(torch.long)
+        token_type_ids = torch.randint(0, 1, (args.input_size,)).type(torch.long)
 
         input_ids = input_ids.expand(
                     args.warm_up_steps + args.steps, B, args.input_size
@@ -222,6 +222,8 @@ def main():  # noqa: C901
         bert_config = BertConfig.from_pretrained(
             args.architecture + "-cased",
             num_labels=3,
+            hidden_dropout_prob=0.0,
+            attention_probs_dropout_prob=0.0,
         )
         model = BertForSequenceClassification.from_pretrained(
             args.architecture + "-cased",
@@ -230,6 +232,18 @@ def main():  # noqa: C901
 
         model.bert.embeddings.position_embeddings.requires_grad_(False)
         model.bert.embeddings.token_type_embeddings.requires_grad_(False)
+
+        # Save or load model
+        if args.model_load_path:
+            model.load_state_dict(torch.load(args.model_load_path))
+        if args.model_save_path:
+            torch.save(model.state_dict(), args.model_save_path)
+
+        # Save of load inputs
+        if args.input_load_path:
+            inputs, labels = torch.load(args.input_load_path)
+        if args.input_save_path:
+            torch.save((inputs, labels), args.input_save_path)
 
         train_dataset = TensorDataset(*inputs, labels)
         train_loader = torch.utils.data.DataLoader(
@@ -337,12 +351,12 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="mean",
+            loss_reduction="sum",
             grad_sample_mode=config.grad_sample_mode
         )
 
     if args.architecture == "deepspeech":
-        criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+        criterion = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
         def criterion_func(output, target):
             return criterion(output[0], target, output[1], 
                              torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
@@ -351,8 +365,8 @@ def main():  # noqa: C901
             return criterion_non_reduction(output[0], target, output[1], 
                                            torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
     else:
-        criterion_func = nn.CrossEntropyLoss(reduction="mean")
-        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="mean")
+        criterion_func = nn.CrossEntropyLoss(reduction="sum")
+        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="sum")
 
     model.train()
     print(model)
@@ -374,7 +388,7 @@ def main():  # noqa: C901
                 else:
                     inputs[tensor_idx] = tensor.cuda(non_blocking=True)
             
-            print(f"inputs stride : {inputs[0].stride()}")
+            # print(f"inputs stride : {inputs[0].stride()}")
             profiler.record("Data loading")
 
             # compute output

@@ -33,7 +33,7 @@ bool _first_run = true;
 
 std::vector<LinearDescriptor> descriptors;
 
-size_t partial_per_example_gradient_size = 0;
+int64_t partial_per_example_gradient_size = 0;
 size_t non_reweight_per_example_gradient_size = 0;
 size_t best_end_non_reweight_layer = 3;
 
@@ -86,7 +86,7 @@ void set_descriptors_linear(std::vector<LinearConfig> &configs, bool quant=false
                                 config->out_features,
                                 config->num_layers};
 
-    size_t gradient_size = Linear::descriptors.at(i).grad_weight_per_example_size;
+    int64_t gradient_size = (int64_t)Linear::descriptors.at(i).grad_weight_per_example_size;
     for (int layer_idx=0; layer_idx < config->num_layers; ++layer_idx) {
       Linear::partial_per_example_gradient_size += gradient_size;
     }
@@ -167,8 +167,8 @@ void compute_single_per_example_gradient_cublas(torch::Tensor &per_example_gradi
   using namespace torch::indexing;
 
   // cudnnHandle_t cudnn_handle;
-  float alpha_float = 1;
-  float beta_float = 0;
+  float alpha_float = 1.0;
+  float beta_float = 0.0;
 
   int offset = 0;
   
@@ -234,22 +234,26 @@ void compute_single_per_example_gradient_embedding(torch::Tensor embedding_gradi
     using namespace torch::indexing;
 
 
-    int offset = Linear::partial_per_example_gradient_size;
+    int64_t offset = Linear::partial_per_example_gradient_size;
     for (size_t i=0; i < embedding_actvs.size(); ++i) {
         int embedding_gradient_size = embedding_ograds.at(i).sizes()[2] * embedding_vocab_sizes.at(i);
         auto embedding_gradient = embedding_gradients.index({Slice(offset, offset + embedding_gradient_size)}).view({embedding_vocab_sizes.at(i), embedding_ograds.at(i).sizes()[2]});
+        // printf("embedding_gradient %p\n", embedding_gradient.data_ptr());
 
         auto actv = embedding_actvs.at(i).index({example_idx});
         auto ograd = embedding_ograds.at(i).index({example_idx});
         auto index = actv.unsqueeze(-1).expand({actv.sizes()[0], ograd.sizes()[1]}).reshape({-1, ograd.sizes()[1]});
 
         // embedding_gradient.zero_();
-        cudaMemsetAsync(embedding_gradient.data_ptr(), 0, embedding_gradient_size);
+        // printf("embedding_gradient2 %p\n", embedding_gradient.data_ptr());
+        checkCudaErrors(cudaMemsetAsync(embedding_gradient.data_ptr(), 0, embedding_gradient_size * sizeof(float)));
         // embedding_gradient.index_put_({Slice()}, torch::zeros({embedding_vocab_sizes.at(i), ograd.sizes()[1]}, torch::TensorOptions().device(torch::kCUDA, 0)));
 
         embedding_gradient.scatter_add_(0, index, ograd.reshape({actv.sizes()[0], ograd.sizes()[1]}));
     
         offset += embedding_gradient_size;
+
+        // std::cout << "Embedding norm, " << torch::frobenius_norm(embedding_gradient.flatten(), {0}, false) << std::endl;
     } 
 }
 
@@ -280,16 +284,27 @@ void compute_per_batch_gradient_embedding(std::vector<torch::Tensor>& per_batch_
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+// torch::Tensor prev_partial_per_example_gradient = torch::empty({0});
+
 void compute_single_scaling_factor(float * scaling_factor_out,
                                    const torch::Tensor partial_per_example_gradient,
                                    float max_norm,
                                    int scale_loss) {
   
   using namespace torch::indexing;
-
+  // std::cout << "pre_computed_grad_norms, " << partial_per_example_gradient.index({-1}) << std::endl;
+  // if (prev_partial_per_example_gradient.sizes()[0] != 0) {
+  //   // std::cout << "partial_per_example_gradient_size, " << Linear::partial_per_example_gradient_size << std::endl;
+  //   // std::cout << "Non equals, " << prev_partial_per_example_gradient.ne(partial_per_example_gradient).nonzero().sizes()[0] << std::endl;
+  //   if (prev_partial_per_example_gradient.ne(partial_per_example_gradient).nonzero().sizes()[0] > 0) {
+  //     std::cout << "Non equals, " << prev_partial_per_example_gradient.ne(partial_per_example_gradient).nonzero()[0].item() << std::endl;
+  //   }
+  // }
+  // std::cout << "partial_per_example_gradient, " << partial_per_example_gradient.index({Slice(91034112, 91034112+10)}) << std::endl;
+  // prev_partial_per_example_gradient = partial_per_example_gradient;
   auto norm = torch::frobenius_norm(partial_per_example_gradient, {0}, false);
-
-  compute_scaling_factor_cuda(scaling_factor_out, (float *)norm.data_ptr(), max_norm, scale_loss);
+  // std::cout << "Norms, " << norm << std::endl;
+  compute_scaling_factor_cuda(scaling_factor_out, (float *)norm.data_ptr(), max_norm, 1, scale_loss);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -323,12 +338,21 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   float clip_reduce_ms = 0.0;
   float norm_ms = 0.0;
   float add_noise_ms = 0.0;
+
+  for (auto& ograds_flatten : ograds) {
+    for (auto& ograd : ograds_flatten) {
+      if (!ograd.is_contiguous()) {
+        ograd = ograd.contiguous();
+      }
+    }
+  }
   
   // Create tensor for embedding gradients
   int embedding_gradient_size = 0;
   std::vector<torch::Tensor> embedding_per_example_gradients;
   for (size_t i=0; i<embedding_actvs.size(); ++i) {
     embedding_gradient_size += embedding_vocab_sizes.at(i) * embedding_ograds.at(i).sizes()[2];
+    // printf("embedding_gradient_size = %d\n", embedding_gradient_size);
   }
   // printf("1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   auto partial_per_example_gradient = torch::empty({(int64_t)Linear::partial_per_example_gradient_size + embedding_gradient_size + 1}, torch::TensorOptions().device(torch::kCUDA, 0));
@@ -348,6 +372,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       offset += precomputed_per_example_grads.at(i).numel() / batch_count;
     }
   }
+  // std::cout << gathered_per_example_grads.index({0, Slice(0, 10)}) << std::endl;
   gathered_per_example_grads.index_put_({Slice(), gathered_per_example_grads_size}, precomputed_per_example_grad_norms.at(0));
   auto precomputed_per_example_norms = torch::frobenius_norm(gathered_per_example_grads, {1});
   gathered_per_example_grads = gathered_per_example_grads.index({Slice(0, batch_count), Slice(0, gathered_per_example_grads_size)});
@@ -374,6 +399,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   // c10::cuda::CUDACachingAllocator::emptyCache();
   // Create tensor to accumulate gradients
   auto per_batch_gradient = torch::zeros({(int64_t)Linear::partial_per_example_gradient_size}, torch::TensorOptions().device(torch::kCUDA, 0));
+  auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)});
   // c10::cuda::CUDACachingAllocator::emptyCache();
   // printf("4.1 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   // Workspace to store scaling factors
@@ -422,7 +448,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     LOG_STDERR("Clip and accumulate", verbose);
     // Clip and accumulate
     if (Linear::non_reweight_per_example_gradient_size > 0) {
-      auto partial_per_batch_gradient = per_batch_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)});
+      // printf("non_reweight_per_example_gradient_size = %d\n", Linear::non_reweight_per_example_gradient_size);
       partial_per_batch_gradient.add_(partial_per_example_gradient.index({Slice(0, (int64_t)Linear::non_reweight_per_example_gradient_size)}), scaling_factors.index({example_idx}).item());
 
       // checkCUBLAS(cublasSaxpy(Linear::cublas_device_handles[0],
@@ -514,7 +540,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
         temp_actvs = actvs.at(i).at(layer_idx).to(torch::TensorOptions().dtype(torch::kFloat32));
       }
       else {
-        partial_ograds.mul_(scaling_factors.view(scaling_factors_shape));
+        temp_ograds = partial_ograds.mul(scaling_factors.view(scaling_factors_shape));
       }
 
       LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);
@@ -526,7 +552,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       }
       else{
         torch::matmul_out(per_batch_grads.at(i).at(layer_idx),
-                          ograds.at(i).at(layer_idx).reshape({ograds.at(i).at(layer_idx).sizes()[0]*ograds.at(i).at(layer_idx).sizes()[1], ograds.at(i).at(layer_idx).sizes()[2]}).transpose(0, 1),
+                          temp_ograds.reshape({temp_ograds.sizes()[0]*temp_ograds.sizes()[1], temp_ograds.sizes()[2]}).transpose(0, 1),
                           actvs.at(i).at(layer_idx).reshape({actvs.at(i).at(layer_idx).sizes()[0]*actvs.at(i).at(layer_idx).sizes()[1], actvs.at(i).at(layer_idx).sizes()[2]}));
       }
     }
@@ -560,7 +586,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       temp_actvs = linear_last_actvs.at(i).to(torch::TensorOptions().dtype(torch::kFloat32));
     }
     else {
-      linear_last_ograds.at(i).mul_(scaling_factors.view(scaling_factors_shape));
+      temp_ograds = linear_last_ograds.at(i).mul(scaling_factors.view(scaling_factors_shape));
     }
 
     LOG_STDERR("Compute per-batch gradient for linear last layers", verbose);
@@ -569,7 +595,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       torch::matmul_out(per_batch_linear_last_grads.at(i), temp_ograds.transpose(0, 1), temp_actvs);
     }
     else {
-      torch::matmul_out(per_batch_linear_last_grads.at(i), linear_last_ograds.at(i).transpose(0, 1), linear_last_actvs.at(i));
+      torch::matmul_out(per_batch_linear_last_grads.at(i), temp_ograds.transpose(0, 1), linear_last_actvs.at(i));
     }
     TIME_PROFILE(clip_reduce_ms, time_profile);
     // per_batch_linear_last_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_last_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
@@ -578,13 +604,14 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   }
 
   LOG_STDERR("Scale output grads (for embedding layer) for reweight", verbose);
+  std::vector<torch::Tensor> scaled_embedding_ograds;
   for (size_t i = 0; i < embedding_ograds.size(); ++i) {
     std::vector<int64_t> scaling_factors_shape;
     scaling_factors_shape.push_back(scaling_factors.size(0));
     for (size_t j = 0; j < embedding_ograds.at(i).sizes().size() - 1; ++j) {
       scaling_factors_shape.push_back(1);
     }
-    embedding_ograds.at(i).mul_(scaling_factors.view(scaling_factors_shape));
+    scaled_embedding_ograds.push_back(embedding_ograds.at(i).mul(scaling_factors.view(scaling_factors_shape)));
   }
 
   at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
@@ -600,13 +627,14 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
 
   std::vector<torch::Tensor> per_batch_embedding_grads;
   // 
+  LOG_STDERR("Scale output grads (for embedding layer) for reweight", verbose);
   LOG_STDERR("Compute per-batch gradient for embedding layers", verbose);
   for (size_t i = 0; i < embedding_actvs.size(); ++i) {
     per_batch_embedding_grads.push_back(torch::empty({embedding_vocab_sizes.at(i), embedding_ograds.at(i).sizes()[2]}, torch::TensorOptions().device(torch::kCUDA, 0)));
   }
   compute_per_batch_gradient_embedding(per_batch_embedding_grads, 
                                        embedding_actvs,
-                                       embedding_ograds,
+                                       scaled_embedding_ograds,
                                        embedding_vocab_sizes);
   TIME_PROFILE(clip_reduce_ms, time_profile);
   for (size_t i = 0; i < per_batch_embedding_grads.size(); ++i) {
@@ -618,7 +646,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
 
   TIME_PROFILE(clip_reduce_ms, time_profile);
 
-  printf("Finish C++, %lld\n", std::chrono::high_resolution_clock::now().time_since_epoch().count());
+  // printf("Finish C++, %lld\n", std::chrono::high_resolution_clock::now().time_since_epoch().count());
 
   return ReturnType({flat_per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_last_grads, per_batch_embedding_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, 0);
 }
@@ -758,6 +786,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
     stringStream << "Best end-non-reweight-layer = " << Linear::best_end_non_reweight_layer;
     std::string copyOfStr = stringStream.str();
     LOG_STDERR(copyOfStr, true);
+    // Linear::best_end_non_reweight_layer = 4;// FIXME
 
     // Compute non-reweight per-example gradient size for best-non-reweight-layers
     Linear::non_reweight_per_example_gradient_size = 0;
