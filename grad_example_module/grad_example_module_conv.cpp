@@ -79,6 +79,9 @@ cutlass_wgrad_grouped::OperationWithWorkspace best_operation_with_workspace;
 
 int num_rows_to_compute = 4;
 
+bool use_nchw = false;
+bool use_nchw_reweight = true;
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -100,6 +103,9 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
   if ((configs.at(0).H <= 32) && configs.size() <= 40) {
     num_rows_to_compute = 16;
+  }
+  else if ((configs.at(0).H > 32) && configs.size() <= 40) {
+    num_rows_to_compute = 1;
   }
   else if((configs.at(0).H <= 32) && configs.size() <= 70) {
     num_rows_to_compute = 4;
@@ -144,7 +150,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_desc));
     checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_desc,
                                         dtype,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         config->K,
                                         config->C,
                                         config->R,
@@ -152,7 +158,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->C,
@@ -161,7 +167,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_desc,
-                                        CUDNN_TENSOR_NHWC,
+                                        use_nchw? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         1,
                                         config->K,
@@ -171,7 +177,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
     checkCUDNN(cudnnCreateFilterDescriptor(&descriptors.at(i).filter_batch_desc));
     checkCUDNN(cudnnSetFilter4dDescriptor(descriptors.at(i).filter_batch_desc,
                                         dtype,
-                                        CUDNN_TENSOR_NCHW,
+                                        use_nchw_reweight? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         config->K,
                                         config->C,
                                         config->R,
@@ -179,7 +185,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).input_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).input_batch_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        use_nchw_reweight? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         config->N,
                                         config->C,
@@ -188,7 +194,7 @@ void set_descriptors_conv(std::vector<Conv2dConfig> &configs, bool quant=false, 
 
     checkCUDNN(cudnnCreateTensorDescriptor(&descriptors.at(i).output_batch_desc));
     checkCUDNN(cudnnSetTensor4dDescriptor(descriptors.at(i).output_batch_desc,
-                                        CUDNN_TENSOR_NCHW,
+                                        use_nchw_reweight? CUDNN_TENSOR_NCHW : CUDNN_TENSOR_NHWC,
                                         dtype,
                                         config->N,
                                         config->K,
@@ -736,10 +742,30 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
 
   // convert to nchw -> nhwc
   for (size_t i = 0; i < actvs.size(); ++i) {
-    if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
-      c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
-      // actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
-      ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+    if (use_nchw) {
+      if (i < end_cudnn_layer) {
+        if (! ograds.at(i).is_contiguous(c10::MemoryFormat::Contiguous)) {
+          // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+          ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::Contiguous);
+        }
+        if (! actvs.at(i).is_contiguous(c10::MemoryFormat::Contiguous)) {
+          // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+          actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::Contiguous);
+        }
+      }
+      else {
+        if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
+          // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+          ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+        }
+      }
+    }
+    else {
+      if (! ograds.at(i).is_contiguous(c10::MemoryFormat::ChannelsLast)) {
+        // c10::cuda::setCurrentCUDAStream(c10::cuda::getStreamFromPool());
+        // actvs.at(i) = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+        ograds.at(i) = ograds.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+      }
     }
   }
   c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
@@ -925,10 +951,20 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
   int64_t offset = 0;
   for (size_t i = 0; i < descriptors.size(); ++i) {
     if (i >= end_non_reweight_layer){
-      per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}).view(descriptors.at(i).filter_shape));
+      if (use_nchw_reweight) {
+        per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}).view(descriptors.at(i).filter_shape));
+      }
+      else{
+        per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}).view(descriptors.at(i).filter_shape).contiguous(c10::MemoryFormat::ChannelsLast));
+      }
     }
     else{
-      per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
+      if (use_nchw) {
+        per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}).view(descriptors.at(i).filter_shape));
+      }
+      else {
+        per_batch_grads.push_back(per_batch_gradient.index({Slice(offset, offset + descriptors.at(i).grad_weight_per_example_size)}));
+      }
     }
     offset += descriptors.at(i).grad_weight_per_example_size;
   }
@@ -959,8 +995,14 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
     else {
       // torch::mul_out(ograds.at(i), ograds.at(i), scaling_factors.view(scaling_factors_shape));
       // temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape));
-      temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::Contiguous);
-      temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::Contiguous);
+      if (use_nchw_reweight) {
+        temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::Contiguous);
+        temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::Contiguous);
+      }
+      else {
+        temp_actv = actvs.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+        temp_ograd = torch::mul(ograds.at(i), scaling_factors.view(scaling_factors_shape)).contiguous(c10::MemoryFormat::ChannelsLast);
+      }
     }
 
     LOG_STDERR("Compute per-batch gradient for rewight layers", verbose);
@@ -1000,7 +1042,9 @@ ReturnType clip_and_reduce_grads_conv(std::vector<Conv2dConfig> &configs,
                                                 descriptor.filter_batch_desc,
                                                 per_batch_grads.at(i).data_ptr()));
     }
-    per_batch_grads.at(i) = per_batch_grads.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+    if (use_nchw_reweight) {
+      per_batch_grads.at(i) = per_batch_grads.at(i).contiguous(c10::MemoryFormat::ChannelsLast);
+    }
   }
   c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
   // Wait all streams to finish

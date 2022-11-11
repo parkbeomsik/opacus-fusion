@@ -555,7 +555,7 @@ class DPOptimizer(Optimizer):
                         S = layer.kernel_size[1]
                         P = layer.grad_outputs[0].shape[2]
                         Q = layer.grad_outputs[0].shape[3]
-                        return P*Q
+                        return P*Q*10000 - K - C*R*S
 
                     self.conv_list.sort(key=compute_k_mn, reverse=True)
 
@@ -579,7 +579,12 @@ class DPOptimizer(Optimizer):
                             pad_h, pad_w = layer.padding
                             stride_h, stride_w = layer.stride
                             dilation_h, dilation_w = layer.dilation
+                            print(P*Q, K, C*R*S)
                             # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
+                            if P*Q > 32 * 32:
+                                split_k_slices = 1
+                            else:
+                                split_k_slices = int(P*Q/128) + 1
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
                                                                                 dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
@@ -637,7 +642,7 @@ class DPOptimizer(Optimizer):
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
                 profiler.add_memory_explicit("Workspace", result_grad_example_module.get_workspace_size())
-                # print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
+                print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
 
                 per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
 

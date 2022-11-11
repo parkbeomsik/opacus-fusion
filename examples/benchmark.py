@@ -113,8 +113,8 @@ def print_args(args):
     print(f"Verbose          : {args.verbose}")
 
 def main():  # noqa: C901
-    # torch.backends.cudnn.benchmark = False
-    # torch.use_deterministic_algorithms(True)
+    torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
     world_size = 1
 
