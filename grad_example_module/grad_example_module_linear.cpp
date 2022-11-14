@@ -557,6 +557,64 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       }
     }
   }
+
+  // float * per_batch_gradient_ptr = (float *)per_batch_gradient.data_ptr();
+  // for (size_t i=0; i < Linear::descriptors.size(); ++i) {
+  //   LinearDescriptor& descriptor = Linear::descriptors.at(i);
+    
+  //   int m = descriptor.config.in_features;
+  //   int n = descriptor.config.out_features;
+  //   int k = descriptor.config.seq_len * descriptor.config.N;
+  //   int batch_size = descriptor.config.N;
+  //   int num_layers = descriptor.config.num_layers;
+    
+  //   if (i < end_non_reweight_layer){
+  //     per_batch_gradient_ptr += m*n*num_layers;
+  //     continue;
+  //   }
+
+  //   at::cuda::setCurrentCUDAStream(at::cuda::getStreamFromExternal(Linear::cuda_streams[i % Linear::n_streams], 0));
+
+  //   std::vector<int64_t> scaling_factors_shape;
+  //   scaling_factors_shape.push_back(scaling_factors.size(0));
+  //   for (size_t j = 0; j < actvs.at(i).at(0).sizes().size() - 1; ++j){
+  //     scaling_factors_shape.push_back(1);
+  //   }
+  //   for (int layer_idx = 0; layer_idx < ograds.at(i).size(); ++layer_idx) {
+  //     ograds.at(i).at(layer_idx).mul_(scaling_factors.view(scaling_factors_shape));
+  //   }
+
+  //   float alpha = 1.0;
+  //   float beta = 0.0;
+
+  //   std::vector<void *> host_wgrad_ptrs(num_layers, NULL);
+  //   for (int l = 0; l < num_layers; ++l) {
+  //     host_wgrad_ptrs.at(l) = per_batch_gradient_ptr;
+  //     per_batch_gradient_ptr += m*n;
+  //   }
+  //   torch::Tensor device_wgrad_ptrs = torch::empty({(int64_t)sizeof(void *)*num_layers}, torch::TensorOptions().device(torch::kCUDA, 0).dtype(torch::kChar));
+  //   checkCudaErrors(cudaMemcpyAsync(device_wgrad_ptrs.data_ptr(), &host_wgrad_ptrs[0], sizeof(void *)*num_layers, cudaMemcpyHostToDevice, Linear::cuda_streams[i & Linear::n_streams]));
+
+  //   checkCUBLAS(cublasGemmBatchedEx(Linear::cublas_handles[i % Linear::n_streams],
+  //                                   CUBLAS_OP_N, CUBLAS_OP_T,
+  //                                   m, n, k,
+  //                                   &alpha,
+  //                                   descriptor.A_array,
+  //                                   CUDA_R_32F,
+  //                                   m,
+  //                                   descriptor.B_array,
+  //                                   CUDA_R_32F,
+  //                                   n,
+  //                                   &beta,
+  //                                   (void **)device_wgrad_ptrs.data_ptr(),
+  //                                   CUDA_R_32F,
+  //                                   m,
+  //                                   num_layers,
+  //                                   CUBLAS_COMPUTE_32F,
+  //                                   CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+  //   checkCudaErrors(cudaDeviceSynchronize());
+  //   // per_batch_gradient_ptr += m*n*num_layers;
+  // }
   // Wait all streams to finish
   for (size_t i=0; i < Linear::n_streams; ++i) {
     checkCudaErrors(cudaEventRecord(events[i], Linear::cuda_streams[i]));
@@ -709,7 +767,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
       }
 
       // Warm up
-      for (int i = 0; i < 1; ++i) {
+      for (int i = 0; i < 3; ++i) {
         auto _ = clip_and_reduce_grads_linear(configs,
                                               actvs,
                                               ograds,

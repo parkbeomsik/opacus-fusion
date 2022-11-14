@@ -53,8 +53,8 @@ rnn_experiments = [
     # ("rnn", "gnmt", "512"),
 ]
 
-experiments = cnn_experiments + transformer_experiments + rnn_experiments
-algos = ["naive", "reweight", "elegant"]
+experiments = cnn_experiments
+algos = ["elegant"]
 grad_sample_modes = ["hooks", "ew"]
 
 experiments = list(itertools.product(experiments, algos, grad_sample_modes))

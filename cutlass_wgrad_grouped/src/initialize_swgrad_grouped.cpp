@@ -22,7 +22,7 @@ void initialize_swgrad_grouped(std::vector<Operation*>& operations) {
     initialize_cutlass_simt_swgrad_grouped_optimized_32x32x8_32x32x8_1x1x1_5_nhwc(operations);
     initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_16x64x2_1x1x1_3_nhwc(operations);
     initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_16x64x2_1x1x1_5_nhwc(operations);
-    initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_32x32x2_1x1x1_3_nhwc(operations); //
+    initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_32x32x2_1x1x1_3_nhwc(operations);
     initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_32x32x2_1x1x1_5_nhwc(operations);
     initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_32x64x2_1x1x1_3_nhwc(operations);
     initialize_cutlass_simt_swgrad_grouped_optimized_32x64x2_32x64x2_1x1x1_5_nhwc(operations);

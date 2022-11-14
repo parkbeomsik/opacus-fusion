@@ -579,7 +579,7 @@ class DPOptimizer(Optimizer):
                             pad_h, pad_w = layer.padding
                             stride_h, stride_w = layer.stride
                             dilation_h, dilation_w = layer.dilation
-                            print(P*Q, K, C*R*S)
+                            # print(P*Q, K, C*R*S)
                             # print(pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w)
                             if P*Q > 512:
                                 split_k_slices = 1
@@ -588,8 +588,9 @@ class DPOptimizer(Optimizer):
                             self.configs.append(grad_example_module.Conv2dConfig(N, H, W, C, K, R, S, P, Q,
                                                                                 pad_h, pad_w, stride_h, stride_w,
                                                                                 dilation_h, dilation_w, 1)) # int(P*Q/split_k_size)+
-                            # args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w])
+                            args = map(str, [N, H, W, C, K, R, S, P, Q, pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w, 1])
                             # print(f"{i} {'x'.join(args)}")
+                            print(f"configs.push_back({{{', '.join(args)}}});")
                             # i += 1   
 
                     self.first_run = False
