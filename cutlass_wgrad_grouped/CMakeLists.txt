@@ -69,6 +69,8 @@ target_compile_definitions(cutlass_wgrad_grouped PRIVATE $<$<COMPILE_LANGUAGE:CX
 else()
 message(STATUS "Compute capability <80 is used")
 endif()
+# target_compile_options(cutlass_wgrad_grouped PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-g>)
+# target_compile_options(cutlass_wgrad_grouped PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-G>) 
 
 install(TARGETS cutlass_wgrad_grouped
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

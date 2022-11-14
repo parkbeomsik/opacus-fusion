@@ -117,7 +117,12 @@ protected:
       config->host_problem_sizes
     );
 
-    return op->get_workspace_size(args);
+    if (op->maximum_active_blocks() > 0) {
+      return op->get_workspace_size(args);
+    }
+    else {
+      return ((size_t)1 << 40);
+    }
   }
   
   /// Initializes the workspace

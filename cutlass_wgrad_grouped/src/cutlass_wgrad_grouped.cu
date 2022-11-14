@@ -27,6 +27,10 @@ std::vector<Operation *> operations;
 
 std::vector<void *> device_workspaces;
 // std::vector<void *> host_workspaces;
+void * device_workspace_shared;
+wGradGroupedConfig wgrad_config;
+
+std::vector<cutlass::conv::Conv2dProblemSize> host_problems;
 
 std::vector<OperationWithWorkspace> operations_with_workspaces;
 
@@ -62,7 +66,7 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     // printf("problem count = %d\n", problem_count);
 
     // Set problem sizes in host memory first
-    std::vector<Conv2dProblemSize> host_problems;
+    host_problems.clear();
     for (int i = 0; i < problem_count; ++i) {
         Conv2dConfig host_config = host_configs.at(i);
 
@@ -135,17 +139,23 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     device_workspaces.push_back(device_ref_C);
     device_workspaces.push_back(device_ref_D);
 
-    wGradGroupedConfig wgrad_config = {(Conv2dProblemSize *)_device_problems,
-                                       problem_count,
-                                       (void *)device_ref_A,
-                                       (void *)device_ref_B,
-                                       (void *)device_ref_C,
-                                       (void *)device_ref_D,
-                                       &host_problems[0]};
+    wgrad_config = {(Conv2dProblemSize *)_device_problems,
+                    problem_count,
+                    (void *)device_ref_A,
+                    (void *)device_ref_B,
+                    (void *)device_ref_C,
+                    (void *)device_ref_D,
+                    &host_problems[0]};
     for (auto operation : operations) {
         void * host_workspace = malloc(operation->get_host_workspace_size());
         operations_with_workspaces.push_back(OperationWithWorkspace({operation, host_workspace}));
     }
+
+    operations_with_workspaces.erase(std::remove_if(
+        operations_with_workspaces.begin(), operations_with_workspaces.end(), 
+        [&](OperationWithWorkspace op) { 
+            return op.operation->get_workspace_size(&wgrad_config, op.host_workspace) >= ((size_t)1<<40); }), 
+            operations_with_workspaces.end());
 
     size_t max_workspace_size = 0;
     for (auto& operation_with_workspace : operations_with_workspaces) {
@@ -157,8 +167,9 @@ void initialize_problems(std::vector<Conv2dConfig> const & host_configs) {
     
     void * device_semaphore;
     printf("Allocate %lu B device workspace\n", max_workspace_size);
-    checkCudaErrors(cudaMalloc(&device_semaphore, max_workspace_size));
+    checkCudaErrors(cudaMalloc(&device_semaphore, (size_t)1<<30));
     device_workspaces.push_back(device_semaphore);
+    device_workspace_shared = device_semaphore;
 
     // for (auto operation_with_workspace : operations_with_workspaces) {
     //     checkCUTLASS(operation_with_workspace.operation->initialize(&wgrad_config, device_semaphore, operation_with_workspace.host_workspace));
@@ -212,11 +223,14 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
     }
 
     for (int i = 0; i < operations_with_workspaces.size(); ++i) {
+        // printf("i = %d\n", i);
 
         auto operation = operations_with_workspaces.at(i).operation;
         auto host_workspace = operations_with_workspaces.at(i).host_workspace;
 
+        checkCUTLASS(operation->initialize(&wgrad_config, device_workspace_shared, host_workspace));
         checkCUTLASS(operation->update_ptrs(ptr_A, ptr_B, ptr_C, ptr_D, problem_count, host_workspace));
+        checkCudaErrors(cudaDeviceSynchronize());
 
         // Warm up
 
@@ -295,6 +309,9 @@ OperationWithWorkspace get_best_operation(void ** ptr_A,
     }
 
     std::cout << best_operation.operation->name << "( " << min_runtime_ms / 20 << " ms )" << std::endl;
+
+    checkCUTLASS(best_operation.operation->initialize(&wgrad_config, device_workspace_shared, best_operation.host_workspace));
+    checkCUTLASS(best_operation.operation->update_ptrs(ptr_A, ptr_B, ptr_C, ptr_D, problem_count, best_operation.host_workspace));
 
     return best_operation;
 }
