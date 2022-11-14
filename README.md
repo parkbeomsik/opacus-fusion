@@ -1,3 +1,6 @@
+# Opacus-fusion
+Opacus-fusion is an extension of PyTorch Opacus. It allows an fast an efficient DP-SGD training via example-wise weight gradient computation and adaptive clipping.
+
 ## Prerequisite
 CUDA Toolkit, CUDNN, CUBLAS should be installed.
 
