@@ -12,13 +12,15 @@ struct ReturnType {
              float norm_ms,
              float clip_reduce_ms,
              float add_noise_ms,
-             size_t workspace_size):
+             size_t workspace_size,
+             size_t per_example_gradient_size):
              per_batch_grads(per_batch_grads),
              backward_weight_ms(backward_weight_ms),
              norm_ms(norm_ms),
              add_noise_ms(add_noise_ms),
              clip_reduce_ms(clip_reduce_ms),
-             workspace_size(workspace_size) {};
+             workspace_size(workspace_size),
+             per_example_gradient_size(per_example_gradient_size) {};
 
   std::vector<std::vector<torch::Tensor>> get_per_batch_grads() {
     return per_batch_grads;
@@ -39,6 +41,9 @@ struct ReturnType {
   size_t get_workspace_size() {
     return workspace_size;
   } 
+  size_t get_per_example_gradient_size() {
+    return per_example_gradient_size;
+  }
 
   std::vector<std::vector<torch::Tensor>> per_batch_grads;
   
@@ -49,6 +54,7 @@ struct ReturnType {
 
   size_t peak_memory_usage;
   size_t workspace_size;
+  size_t per_example_gradient_size;
 };
 
 struct LinearReturnType {
@@ -57,12 +63,14 @@ struct LinearReturnType {
              float backward_weight_ms,
              float norm_ms,
              float clip_reduce_ms,
-             size_t peak_memory_usage):
+             size_t peak_memory_usage,
+             size_t per_example_gradient_size):
              per_batch_grads(per_batch_grads),
              backward_weight_ms(backward_weight_ms),
              norm_ms(norm_ms),
              clip_reduce_ms(clip_reduce_ms),
-             peak_memory_usage(peak_memory_usage) {};
+             peak_memory_usage(peak_memory_usage),
+             per_example_gradient_size(per_example_gradient_size) {};
 
   std::vector<std::vector<torch::Tensor>> get_per_batch_grads() {
     return per_batch_grads;
@@ -77,6 +85,9 @@ struct LinearReturnType {
   float get_clip_reduce_ms() {
     return clip_reduce_ms;
   } 
+  size_t get_per_example_gradient_size() {
+    return per_example_gradient_size;
+  }
 
   std::vector<std::vector<torch::Tensor>> per_batch_grads;
   
@@ -85,6 +96,7 @@ struct LinearReturnType {
   float clip_reduce_ms;
 
   size_t peak_memory_usage;
+  size_t per_example_gradient_size;
 };
 
 struct Conv2dConfig {

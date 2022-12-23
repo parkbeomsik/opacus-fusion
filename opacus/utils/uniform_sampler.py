@@ -57,6 +57,41 @@ class UniformWithReplacementSampler(Sampler[List[int]]):
 
             num_batches -= 1
 
+class IsobatchUniformWithReplacementSampler(Sampler[List[int]]):
+    r"""
+    This sampler samples elements according to the Sampled Gaussian Mechanism.
+    Each sample is selected with a probability equal to ``sample_rate``.
+    """
+
+    def __init__(self, *, num_samples: int, batch_size: int, generator=None):
+        r"""
+        Args:
+            num_samples: number of samples to draw.
+            sample_rate: probability used in sampling.
+            generator: Generator used in sampling.
+        """
+        self.num_samples = num_samples
+        self.batch_size = batch_size
+        self.generator = generator
+        self.full_indicies = list(range(num_samples))
+
+        if self.num_samples <= 0:
+            raise ValueError(
+                "num_samples should be a positive integer "
+                "value, but got num_samples={}".format(self.num_samples)
+            )
+
+    def __len__(self):
+        return int(self.num_samples / self.batch_size)
+
+    def __iter__(self):
+        num_batches = int(self.num_samples / self.batch_size)
+        while num_batches > 0:
+            indices = torch.randperm(self.num_samples)[:self.batch_size].sort().values.tolist()
+            yield indices
+
+            num_batches -= 1
+
 
 class DistributedUniformWithReplacementSampler(Sampler):
     """

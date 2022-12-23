@@ -19,6 +19,7 @@ import torch
 from opacus.utils.uniform_sampler import (
     DistributedUniformWithReplacementSampler,
     UniformWithReplacementSampler,
+    IsobatchUniformWithReplacementSampler,
 )
 from torch.utils.data import BatchSampler, DataLoader, Dataset, IterableDataset, Sampler
 from torch.utils.data._utils.collate import default_collate
@@ -106,6 +107,8 @@ class DPDataLoader(DataLoader):
         prefetch_factor: int = 2,
         persistent_workers: bool = False,
         distributed: bool = False,
+        batch_size: int = 0,
+        iso_batch_size: bool = False
     ):
         """
 
@@ -128,7 +131,16 @@ class DPDataLoader(DataLoader):
                 ``UniformWithReplacementSampler`` sampler implementations
         """
 
+        if iso_batch_size and batch_size == 0:
+            raise ValueError("If you set iso_batch_size, please set batch_size, too.")
+
         self.sample_rate = sample_rate
+        if iso_batch_size:
+            logger.warning(
+                "Ignoring sample_rate as iso_batch_size is true."
+            )
+            self.sample_rate = batch_size / len(dataset)
+
         self.distributed = distributed
 
         if distributed:
@@ -137,13 +149,24 @@ class DPDataLoader(DataLoader):
                 sample_rate=sample_rate,
                 generator=generator,
             )
+        elif iso_batch_size:
+            batch_sampler = IsobatchUniformWithReplacementSampler(
+                num_samples=len(dataset),  # type: ignore[assignment, arg-type]
+                batch_size=batch_size,
+                generator=generator,
+            )
         else:
             batch_sampler = UniformWithReplacementSampler(
                 num_samples=len(dataset),  # type: ignore[assignment, arg-type]
                 sample_rate=sample_rate,
                 generator=generator,
             )
-        sample_empty_shapes = [[0, *shape_safe(x)] for x in dataset[0]]
+        
+        try:
+            sample_empty_shapes = [[0, *shape_safe(x)] for x in dataset[0]]
+        except:
+            sample_empty_shapes = [(1, 1)]
+
         if collate_fn is None:
             collate_fn = default_collate
 
@@ -196,6 +219,8 @@ class DPDataLoader(DataLoader):
         return cls(
             dataset=data_loader.dataset,
             sample_rate=1 / len(data_loader),
+            batch_size=data_loader.batch_size,
+            iso_batch_size=True,
             num_workers=data_loader.num_workers,
             collate_fn=data_loader.collate_fn,
             pin_memory=data_loader.pin_memory,

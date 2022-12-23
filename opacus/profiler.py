@@ -16,6 +16,7 @@ def get_memory_usage(input_activation=False):
     gc.collect()
     memory_usage = defaultdict(int)
     tracked_ptr_set = set()
+    per_example_gradient_tracked_ptr_set = set()
     for obj in gc.get_objects():
         try:
             if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
@@ -27,7 +28,9 @@ def get_memory_usage(input_activation=False):
                 elif type(obj) == torch.nn.Parameter:
                     memory_usage["Weights"] += size_in_bytes
                 elif type(obj) == PerSampleGrads:
-                    memory_usage["Per-example weight gradients"] += size_in_bytes
+                    if (obj.data_ptr() not in per_example_gradient_tracked_ptr_set):
+                        memory_usage["Per-example weight gradients"] += size_in_bytes
+                        per_example_gradient_tracked_ptr_set.add(obj.data_ptr())
                 elif type(obj) == PerBatchGrads:
                     memory_usage["Per-batch weight gradients"] += size_in_bytes
                 elif type(obj) == GradOutputs:
@@ -36,14 +39,14 @@ def get_memory_usage(input_activation=False):
         except:
             pass
 
-    # if memory_usage["Input activations"] > 18000000000:
+    # if memory_usage["Per-example weight gradients"] > 33570810000:
     #     traceback.print_stack()
     #     for obj in gc.get_objects():
     #         try:
     #             if (torch.is_tensor(obj) or (hasattr(obj, 'data') and torch.is_tensor(obj.data))) \
     #                 and obj.get_device() == 0:
     #                 size_in_bytes = obj.numel() * obj.element_size()
-    #                 if type(obj) == torch.Tensor:
+    #                 if type(obj) == PerSampleGrads:
     #                     print(obj.shape)
     #         except:
     #             pass
@@ -94,6 +97,9 @@ class Profiler():
 
     def add_memory_explicit(self, key="", size=0):
         self.memory_records[key] = size
+    
+    def accumulate_memory_explicit(self, key="", size=0):
+        self.memory_records[key] += size
 
     def record_memory(self, type="", input_activation=False):
         if config.profile_memory:
@@ -126,3 +132,25 @@ class Profiler():
 profiler = Profiler()
 
 total_ignored_time = []
+
+start_time = 0.0
+elapsed_time = 0.0
+
+def start_timer():
+    global start_time
+    torch.cuda.synchronize()
+    start_time = time.time()
+
+def pause_timer():
+    global elapsed_time, start_time
+    torch.cuda.synchronize()
+    elapsed_time += time.time() - start_time
+
+def stop_timer():
+    global elapsed_time, start_time
+    torch.cuda.synchronize()
+    elapsed_time += time.time() - start_time
+
+def get_elapsed_time():
+    global elapsed_time, total_ignored_time
+    return elapsed_time

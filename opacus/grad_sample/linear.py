@@ -61,11 +61,16 @@ def compute_linear_grad_sample(
 
     ret = {}
     if layer.weight.requires_grad_opacus:
-        if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-            gs = PerSampleGrads(contract("n...i,n...j->nij", torch.Tensor(backprops), torch.Tensor(activations)))
+        if config.dpsgd_mode == MODE_NAIVE or (config.dpsgd_mode == MODE_REWEIGHT):# and len(activations.shape) != 2):
+            # print(backprops.shape, activations.shape)
+            gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", torch.Tensor(backprops), torch.Tensor(activations)))
             # gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", backprops, activations))
             ret[layer.weight] = PerSampleGrads(gs)
             profiler.record("Backward weight")
+        # elif config.dpsgd_mode == MODE_REWEIGHT and len(activations.shape) == 2:
+        #     # print(layer.weight.shape)
+        #     layer.weight.grad_sample_norms = [PerSampleGrads(activations.norm(2, dim=1) * backprops.norm(2, dim=1))]
+        #     profiler.record("Backward weight")
         if config.dpsgd_mode == MODE_ELEGANT:
             if (len(activations.shape) == 2):
                 layer.weight.grad_sample_norms = [PerSampleGrads(activations.norm(2, dim=1) * backprops.norm(2, dim=1))]
@@ -80,7 +85,7 @@ def compute_linear_grad_sample(
 
     if layer.bias is not None and layer.bias.requires_grad_opacus:
         # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
-        ret[layer.bias] = PerSampleGrads(contract("n...k->nk", torch.Tensor(backprops)))
+        ret[layer.bias] = PerSampleGrads(torch.einsum("n...k->nk", torch.Tensor(backprops)))
         # ret[layer.bias] = PerSampleGrads(torch.einsum("n...k->nk", backprops))
         profiler.record("Backward weight")
         # if config.dpsgd_mode == MODE_REWEIGHT:

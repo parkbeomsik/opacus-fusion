@@ -20,6 +20,7 @@ from opacus.optimizers import DPOptimizer
 from opacus.utils.uniform_sampler import (
     DistributedUniformWithReplacementSampler,
     UniformWithReplacementSampler,
+    IsobatchUniformWithReplacementSampler
 )
 from torch.utils.data import BatchSampler, DataLoader, Sampler
 
@@ -73,6 +74,8 @@ class BatchSplittingSampler(Sampler[List[int]]):
         ):
             expected_batch_size = self.sampler.sample_rate * self.sampler.num_samples
             return int(len(self.sampler) * (expected_batch_size / self.max_batch_size))
+        elif isinstance(self.sampler, IsobatchUniformWithReplacementSampler):
+            return int(len(self.sampler) * (self.sampler.batch_size / self.max_batch_size))
 
         return len(self.sampler)
 

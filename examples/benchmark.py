@@ -33,6 +33,11 @@ import torch.utils.data
 import torch.utils.data.distributed
 from opacus import PrivacyEngine
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
+from opacus.utils.module_utils import (
+    requires_grad,
+    trainable_modules,
+    trainable_parameters,
+)
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset
 from torchvision import models
@@ -44,6 +49,8 @@ from models.gnmt.gnmt import GNMT
 from models.resnet import resnet18, resnet50, resnet152
 
 from opacus.profiler import profiler, total_ignored_time
+from opacus.layers import dp_fast_rnn
+from opacus.layers.dp_fast_rnn import DPFASTLSTM
 from opacus import config
 
 def debuginfo(message=None):
@@ -104,6 +111,7 @@ def print_args(args):
     print("                          Configuration                           ")
     print("==================================================================")
     print(f"DPSGD mode       : {args.dpsgd_mode}")
+    print(f"Adaptive clipping: {args.adaptive_clipping}")
     print(f"Quantization     : {args.quant}")
     print(f"Model type       : {args.model_type}")
     print(f"Architecture     : {args.architecture}")
@@ -113,6 +121,7 @@ def print_args(args):
     print(f"Verbose          : {args.verbose}")
 
 def main():  # noqa: C901
+    # torch.backends.cudnn.benchmark = True
     # torch.backends.cudnn.benchmark = False
     # torch.use_deterministic_algorithms(True)
 
@@ -131,6 +140,7 @@ def main():  # noqa: C901
 
     config.grad_sample_mode = args.grad_sample_mode
     config.quantization = args.quant
+    config.adaptive_clipping = args.adaptive_clipping
 
     config.profile_value = args.profile_value
     if config.profile_value:
@@ -176,7 +186,7 @@ def main():  # noqa: C901
         if args.model_save_path:
             torch.save(model.state_dict(), args.model_save_path)
 
-        inputs = torch.randn(1, 3, args.input_size, args.input_size)
+        inputs = torch.randn(B, 3, args.input_size, args.input_size)
         inputs = inputs.to(memory_format=torch.channels_last)
 
         # Save of load inputs
@@ -185,7 +195,7 @@ def main():  # noqa: C901
         if args.input_save_path:
             torch.save(inputs, args.input_save_path)
 
-        inputs = inputs.expand(B, 3, args.input_size, args.input_size)
+        # inputs = inputs.expand(B, 3, args.input_size, args.input_size)
         inputs = inputs.expand(
             args.warm_up_steps + args.steps, B, 3, args.input_size, args.input_size
             ).reshape((args.warm_up_steps + args.steps) * B, 3, args.input_size, args.input_size)
@@ -202,56 +212,121 @@ def main():  # noqa: C901
         )
 
     if args.model_type == "transformer":
-        input_ids = torch.randint(0, 20000, (args.input_size,)).type(torch.long)
-        attention_mask = torch.randint(1, 2, (args.input_size,)).type(torch.long)
-        token_type_ids = torch.randint(0, 1, (args.input_size,)).type(torch.long)
+        if "bert" in args.architecture:
+            input_ids = torch.randint(0, 20000, (args.input_size,)).type(torch.long)
+            attention_mask = torch.randint(1, 2, (args.input_size,)).type(torch.long)
+            token_type_ids = torch.randint(0, 1, (args.input_size,)).type(torch.long)
 
-        input_ids = input_ids.expand(
-                    args.warm_up_steps + args.steps, B, args.input_size
-                    ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
-        attention_mask = attention_mask.expand(
-                    args.warm_up_steps + args.steps, B, args.input_size
-                    ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
-        token_type_ids = token_type_ids.expand(
-                    args.warm_up_steps + args.steps, B, args.input_size
-                    ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
-        
-        inputs = (input_ids, attention_mask, token_type_ids)
-        labels = torch.ones(B, dtype=torch.int64).repeat(args.warm_up_steps + args.steps)
+            input_ids = input_ids.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            attention_mask = attention_mask.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            token_type_ids = token_type_ids.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            
+            inputs = (input_ids, attention_mask, token_type_ids)
+            labels = torch.ones(B, dtype=torch.int64).repeat(args.warm_up_steps + args.steps)
 
-        bert_config = BertConfig.from_pretrained(
-            args.architecture + "-cased",
-            num_labels=3,
-            hidden_dropout_prob=0.0,
-            attention_probs_dropout_prob=0.0,
-        )
-        model = BertForSequenceClassification.from_pretrained(
-            args.architecture + "-cased",
-            config=bert_config,
-        )
+            if args.architecture in ["bert-base", "bert-large"]:
+                bert_config = BertConfig.from_pretrained(
+                    args.architecture + "-cased",
+                    num_labels=3,
+                    hidden_dropout_prob=0.0,
+                    attention_probs_dropout_prob=0.0,
+                )
+                model = BertForSequenceClassification.from_pretrained(
+                    args.architecture + "-cased",
+                    config=bert_config,
+                )
+            elif args.architecture == "bert-xlarge":
+                bert_config = BertConfig(
+                    hidden_size=1024,
+                    num_hidden_layers=36,
+                    num_attention_heads=16,
+                    intermediate_size=4096
+                )
+                model = BertForSequenceClassification(
+                    config=bert_config,
+                )        
+            else:
+                raise ValueError(f"No matched architecture ({args.architecture})")  
 
-        model.bert.embeddings.position_embeddings.requires_grad_(False)
-        model.bert.embeddings.token_type_embeddings.requires_grad_(False)
+            model.bert.embeddings.position_embeddings.requires_grad_(False)
+            model.bert.embeddings.token_type_embeddings.requires_grad_(False)
 
-        # Save or load model
-        if args.model_load_path:
-            model.load_state_dict(torch.load(args.model_load_path))
-        if args.model_save_path:
-            torch.save(model.state_dict(), args.model_save_path)
+            # Save or load model
+            if args.model_load_path:
+                model.load_state_dict(torch.load(args.model_load_path))
+            if args.model_save_path:
+                torch.save(model.state_dict(), args.model_save_path)
 
-        # Save of load inputs
-        if args.input_load_path:
-            inputs, labels = torch.load(args.input_load_path)
-        if args.input_save_path:
-            torch.save((inputs, labels), args.input_save_path)
+            # Save of load inputs
+            if args.input_load_path:
+                inputs, labels = torch.load(args.input_load_path)
+            if args.input_save_path:
+                torch.save((inputs, labels), args.input_save_path)
 
-        train_dataset = TensorDataset(*inputs, labels)
-        train_loader = torch.utils.data.DataLoader(
-            train_dataset,
-            batch_size=B,
-            num_workers=args.workers,
-            pin_memory=True,
-        )
+            train_dataset = TensorDataset(*inputs, labels)
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=B,
+                num_workers=args.workers,
+                pin_memory=True,
+            )
+        elif "gpt" in args.architecture:
+            input_ids = torch.randint(0, 20000, (args.input_size,)).type(torch.long)
+            attention_mask = torch.randint(1, 2, (args.input_size,)).type(torch.long)
+            token_type_ids = torch.randint(0, 1, (args.input_size,)).type(torch.long)
+
+            input_ids = input_ids.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            attention_mask = attention_mask.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            token_type_ids = token_type_ids.expand(
+                        args.warm_up_steps + args.steps, B, args.input_size
+                        ).reshape((args.warm_up_steps + args.steps) * B, args.input_size)
+            
+            inputs = (input_ids, attention_mask, token_type_ids)
+            labels = torch.ones(B, dtype=torch.int64).repeat(args.warm_up_steps + args.steps)
+
+            bert_config = GPT.from_pretrained(
+                args.architecture,
+                num_labels=3,
+                hidden_dropout_prob=0.0,
+                attention_probs_dropout_prob=0.0,
+            )
+            model = BertForSequenceClassification.from_pretrained(
+                args.architecture,
+                config=bert_config,
+            )
+
+            model.bert.embeddings.position_embeddings.requires_grad_(False)
+            model.bert.embeddings.token_type_embeddings.requires_grad_(False)
+
+            # Save or load model
+            if args.model_load_path:
+                model.load_state_dict(torch.load(args.model_load_path))
+            if args.model_save_path:
+                torch.save(model.state_dict(), args.model_save_path)
+
+            # Save of load inputs
+            if args.input_load_path:
+                inputs, labels = torch.load(args.input_load_path)
+            if args.input_save_path:
+                torch.save((inputs, labels), args.input_save_path)
+
+            train_dataset = TensorDataset(*inputs, labels)
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset,
+                batch_size=B,
+                num_workers=args.workers,
+                pin_memory=True,
+            )
 
     if args.model_type == "rnn":
         if args.architecture == "deepspeech":
@@ -299,6 +374,18 @@ def main():  # noqa: C901
             labels = labels.repeat(args.warm_up_steps + args.steps, 1)
 
             model = GNMT()
+
+            # Save or load model
+            if args.model_load_path:
+                model.load_state_dict(torch.load(args.model_load_path))
+            if args.model_save_path:
+                torch.save(model.state_dict(), args.model_save_path)
+
+            # Save of load inputs
+            if args.input_load_path:
+                inputs, labels = torch.load(args.input_load_path)
+            if args.input_save_path:
+                torch.save((inputs, labels), args.input_save_path)
 
             train_dataset = TensorDataset(*inputs, labels)
             train_loader = torch.utils.data.DataLoader(
@@ -351,12 +438,51 @@ def main():  # noqa: C901
             noise_multiplier=args.sigma,
             max_grad_norm=max_grad_norm,
             poisson_sampling=False,
-            loss_reduction="sum",
+            loss_reduction="mean",
             grad_sample_mode=config.grad_sample_mode
         )
+    else:
+        pass
+        def requires_grad(module):
+            requires_grad = any(p.requires_grad for p in module.parameters(False))
+            return requires_grad
+        def dummy_forward_hook(_module, _forward_input, _forward_output):
+            if (
+                not requires_grad(_module)
+                or not _module.training
+                or not torch.is_grad_enabled()
+            ):
+                return
+
+            if not hasattr(module, "activations"):
+                module.activations = []
+
+            if isinstance(module, DPFASTLSTM):
+                module.activations += dp_fast_rnn.input_actvs
+                dp_fast_rnn.input_actvs = []
+            else:
+                module.activations.append(torch.empty((0,)))  # pyre-ignore
+
+            for _, p in trainable_parameters(module):
+                p._forward_counter = 0
+
+        def dummy_backward_hook(_module, _forward_input, _forward_output):
+            torch.cuda.synchronize()
+            return
+        
+        def dummy_tensor_hook(grad):
+            torch.cuda.synchronize()
+            return
+
+        for _module_name, module in trainable_modules(model):
+        #     module.register_forward_hook(dummy_forward_hook)
+            module.register_backward_hook(dummy_backward_hook)  
+        for name, params in model.named_parameters():
+            if params.requires_grad:
+                params.register_hook(dummy_tensor_hook) 
 
     if args.architecture == "deepspeech":
-        criterion = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
+        criterion = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
         def criterion_func(output, target):
             return criterion(output[0], target, output[1], 
                              torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
@@ -365,11 +491,11 @@ def main():  # noqa: C901
             return criterion_non_reduction(output[0], target, output[1], 
                                            torch.Tensor([target.shape[1] for _ in range(target.shape[0])]).to(torch.int))
     else:
-        criterion_func = nn.CrossEntropyLoss(reduction="sum")
-        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="sum")
+        criterion_func = nn.CrossEntropyLoss(reduction="mean")
+        criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="none")
 
     model.train()
-    print(model)
+    # print(model)
 
     if args.benchmark_data_loader:
         torch.cuda.synchronize()
@@ -404,6 +530,15 @@ def main():  # noqa: C901
             profiler.record("Backward activation")
 
             if args.disable_dp:
+                # Save gradients
+                if config.grad_save_path:
+                    grad_dict = {}
+                    for name, p in model.named_parameters():
+                        if p.requires_grad:
+                            # grad_dict[name] = torch.as_strided(p.summed_grad, p.shape, p.stride())
+                            grad_dict["_module." + name] = p.grad
+                            # print(p.summed_grad.view_as(p).stride())
+                    torch.save(grad_dict, config.grad_save_path)
                 optimizer.step()
             else:
                 optimizer.step(input = inputs, criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
@@ -447,35 +582,36 @@ def main():  # noqa: C901
         print("                                     Throughput (#examples/s)")
         print("")
         print((args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))))
+        # print(end - start, sum(total_ignored_time[args.warm_up_steps:]))
 
         throughput = args.steps * args.batch_size / (end - start - sum(total_ignored_time[args.warm_up_steps:]))
 
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}_{args.adaptive_clipping},{throughput}\n")
             else:
                 with open(args.log_file, "w") as f:
                     f.write("Config,Throughput (#example/s)\n")
-                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode},{throughput}\n")
+                    f.write(f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}_{args.adaptive_clipping},{throughput}\n")
 
     if config.profile_time and not config.profile_throughput:
         print("==============================================================================================")
         print("")
         print("                                     Time records (ms)")
         print("")
-        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]))
+        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.adaptive_clipping}"]))
         print("")
-        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}"]).to_csv())
+        print(profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{args.adaptive_clipping}"]).to_csv())
 
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}_{args.adaptive_clipping}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
+                    row = profiler.time_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}_{args.adaptive_clipping}"]).to_csv()
                     f.write(row)
 
     if config.profile_memory:
@@ -491,11 +627,11 @@ def main():  # noqa: C901
         if args.log_file != "":
             if os.path.exists(args.log_file):
                 with open(args.log_file, "a") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}"]).to_csv()
                     f.write(row.split('\n')[1] + "\n")
             else:
                 with open(args.log_file, "w") as f:
-                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode}"]).to_csv()
+                    row = profiler.memory_as_df([f"{args.architecture}_{args.input_size}x{args.input_size}_{args.batch_size}_{args.dpsgd_mode}_{'int8' if args.quant else 'no'}_{args.grad_sample_mode if not args.disable_dp else 'sgd'}"]).to_csv()
                     f.write(row)
 
 def parse_args():
@@ -637,6 +773,13 @@ def parse_args():
         action="store_true",
         default=False,
         help="INT8 quantization.",
+    )
+
+    parser.add_argument(
+        "--adaptive_clipping",
+        action="store_true",
+        default=False,
+        help="Enable adaptive clipping.",
     )
 
     parser.add_argument(

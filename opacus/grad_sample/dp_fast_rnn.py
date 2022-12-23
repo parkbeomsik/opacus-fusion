@@ -75,7 +75,7 @@ def compute_rnn_grad_sample(
     ret = {}
     if layer.weight_ih.requires_grad_opacus:
         if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-            gs = PerSampleGrads(contract("n...i,n...j->nij", grad_gates, i_actv, backend="torch"))
+            gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", grad_gates, i_actv))
             profiler.record("Backward weight")
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight_ih] = PerSampleGrads(gs)
@@ -85,7 +85,7 @@ def compute_rnn_grad_sample(
 
     if layer.weight_hh.requires_grad_opacus:
         if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-            gs = PerSampleGrads(contract("n...i,n...j->nij", grad_gates, h_actv, backend="torch"))
+            gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", grad_gates, h_actv))
             profiler.record("Backward weight")
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                 ret[layer.weight_hh] = PerSampleGrads(gs)
@@ -94,7 +94,7 @@ def compute_rnn_grad_sample(
             #     profiler.record("Clip/reduce")            
 
     if layer.bias is not None and layer.bias.requires_grad_opacus:
-        contracted_backprops = PerSampleGrads(contract("n...k->nk", grad_gates, backend="torch"))
+        contracted_backprops = PerSampleGrads(torch.einsum("n...k->nk", grad_gates))
         profiler.record("Backward weight")
         # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
         ret[layer.bias] = contracted_backprops
@@ -105,7 +105,7 @@ def compute_rnn_grad_sample(
     if layer.bidirectional:
         if layer.weight_ih_reverse.requires_grad_opacus:
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-                gs = PerSampleGrads(contract("n...i,n...j->nij", grad_gates, i_actv, backend="torch"))
+                gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", grad_gates_reverse, i_actv))
                 profiler.record("Backward weight")
                 if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                     ret[layer.weight_ih_reverse] = PerSampleGrads(gs)
@@ -115,7 +115,7 @@ def compute_rnn_grad_sample(
 
         if layer.weight_hh_reverse.requires_grad_opacus:
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-                gs = PerSampleGrads(contract("n...i,n...j->nij", grad_gates, h_actv_reverse, backend="torch"))
+                gs = PerSampleGrads(torch.einsum("n...i,n...j->nij", grad_gates_reverse, h_actv_reverse))
                 profiler.record("Backward weight")
                 if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
                     ret[layer.weight_hh_reverse] = PerSampleGrads(gs)
@@ -124,7 +124,7 @@ def compute_rnn_grad_sample(
                 #     profiler.record("Clip/reduce")            
 
         if layer.bias_reverse is not None and layer.bias_reverse.requires_grad_opacus:
-            contracted_backprops = PerSampleGrads(contract("n...k->nk", grad_gates_reverse, backend="torch"))
+            contracted_backprops = PerSampleGrads(torch.einsum("n...k->nk", grad_gates_reverse))
             profiler.record("Backward weight")
             # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_ELEGANT:
             ret[layer.bias_reverse] = contracted_backprops

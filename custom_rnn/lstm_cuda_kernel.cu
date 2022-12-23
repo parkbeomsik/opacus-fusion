@@ -46,16 +46,16 @@ __global__ void lstm_forward_cuda_kernel(
   // column index
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c < gates.size(2)){
-    scalar_t f_t = sigmoid(gates[n][0][c]);
-    scalar_t i_t = sigmoid(gates[n][1][c]);
+    scalar_t i_t = sigmoid(gates[n][0][c]);
+    scalar_t f_t = sigmoid(gates[n][1][c]);
     scalar_t g_t = tanh   (gates[n][2][c]);
     scalar_t o_t = sigmoid(gates[n][3][c]);
 
     new_c[n][c] = f_t * old_c[n][c] + i_t * g_t;
     new_h[n][c] = o_t * tanh(new_c[n][c]);
 
-    new_gates[n][0][c] = f_t;
-    new_gates[n][1][c] = i_t;
+    new_gates[n][0][c] = i_t;
+    new_gates[n][1][c] = f_t;
     new_gates[n][2][c] = g_t;
     new_gates[n][3][c] = o_t;
   }
@@ -104,9 +104,14 @@ std::vector<torch::Tensor> lstm_cuda_forward(
   assert(c_0.size(1) == N);
   assert(c_0.size(2) == H);
 
+  // std::cout << input << std::endl;
+  // std::cout << weight_ih << std::endl;
+
   auto xW = torch::matmul(input.reshape({input.size(0) * input.size(1), input.size(2)}), 
                           weight_ih.transpose(0, 1)); // [L*N, 4*H]
   xW = xW.reshape({L, N, 4*H}); // [L, N, 4*H]
+
+  // std::cout << xW << std::endl;
 
   // Create tensors which store activations
   auto gate_actv = torch::empty({L, N, 4*H}, torch::dtype(torch::kFloat32).device(torch::kCUDA, 0));
@@ -141,6 +146,8 @@ std::vector<torch::Tensor> lstm_cuda_forward(
     auto gate_input = torch::addmm(bias + xW.index({t-1}),
                                    old_h,
                                    weight_hh.transpose(0, 1)); // [N, 4*H]
+
+    // std::cout << gate_input << std::endl;
     
     auto old_c = c_actv.index({t-1}); // [N, H]
     auto new_h = torch::empty_like(old_c); // [N, H]
@@ -245,8 +252,8 @@ __global__ void lstm_backward_cuda_kernel(
   // column index
   const int c = blockIdx.x * blockDim.x + threadIdx.x;
   if (c < gates.size(2)){
-    const auto f_t = gates[n][0][c];
-    const auto i_t = gates[n][1][c];
+    const auto i_t = gates[n][0][c];
+    const auto f_t = gates[n][1][c];
     const auto g_t = gates[n][2][c];
     const auto o_t = gates[n][3][c];
 
@@ -259,10 +266,10 @@ __global__ void lstm_backward_cuda_kernel(
     auto d_g_t = i_t * d_c_t;
     auto d_o_t = tanh(c_t) * grad_h[n][c];
 
-    new_grad_gates[n][0][c] = d_sigmoid(f_t) * d_f_t; 
-    new_grad_gates[n][1][c] = d_sigmoid(i_t) * d_i_t;
-    new_grad_gates[n][2][c] = d_tanh(g_t) * d_g_t;
-    new_grad_gates[n][3][c] = d_sigmoid(o_t) * d_o_t;
+    new_grad_gates[n][0][c] = (1 - i_t) * i_t * d_i_t; 
+    new_grad_gates[n][1][c] = (1 - f_t) * f_t * d_f_t;
+    new_grad_gates[n][2][c] = (1 - g_t * g_t) * d_g_t;
+    new_grad_gates[n][3][c] = (1 - o_t) * o_t * d_o_t;
 
     new_grad_c[n][c] = f_t * d_c_t;
   }

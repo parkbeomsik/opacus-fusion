@@ -74,7 +74,7 @@ class ResidualRecurrentEncoder(nn.Module):
         for lstm in self.rnn_layers:
             init_lstm_(lstm, init_weight)
 
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=dropout, inplace=False)
 
         if embedder is not None:
             self.embedder = embedder
@@ -107,7 +107,7 @@ class ResidualRecurrentEncoder(nn.Module):
         # with residual connections starting from 3rd layer
         for i in range(2, len(self.rnn_layers)):
             residual = x
-            x = self.dropout(x)
+            x = self.dropout(x).clone()
             x, _ = self.rnn_layers[i](x)
             x = x + residual
 

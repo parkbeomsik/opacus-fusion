@@ -123,3 +123,7 @@ cutlass_wgrad_grouped/build
 
 .circleci
 .github
+
+**/qqp_roberta-large_grace/
+**/qqp_roberta-large_naive/
+**/qqp_roberta-large_reweight/

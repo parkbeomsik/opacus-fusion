@@ -59,16 +59,21 @@ def compute_embedding_grad_sample(
                 .expand(*activations.shape, layer.embedding_dim)
                 .reshape(batch_size, -1, layer.embedding_dim)
             )
+            # print(batch_size, *layer.weight.shape)
             grad_sample = torch.zeros(
                 batch_size, *layer.weight.shape, device=layer.weight.device
             )
             grad_sample.scatter_add_(
                 1, index, backprops.reshape(batch_size, -1, layer.embedding_dim)
             )
-            grad_sample = PerSampleGrads(grad_sample)
+            # grad_sample = PerSampleGrads(grad_sample)
             torch.backends.cudnn.deterministic = saved
             if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
-                ret[layer.weight] = grad_sample
+                ret[layer.weight] = PerSampleGrads(grad_sample)
+
+            # print(grad_sample.flatten()[1024:1024+10])
+            # print(grad_sample.shape)
+            # print(grad_sample.nonzero(as_tuple=False)[:10])
 
             profiler.record("Backward weight")
 

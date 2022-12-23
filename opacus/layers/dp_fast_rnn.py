@@ -110,9 +110,12 @@ class LSTMFunction(torch.autograd.Function):
         grad_bias = None
         grad_bias_reverse = None
 
+        # print("DPFASTLSTM grad_gates", grad_gates)
+        # print("DPFASTLSTM i_actv", i_actv)
+
         if weight_ih.requires_grad:
             grad_weight_ih = torch.matmul(grad_gates.reshape(L*N, 4*H).transpose(0, 1),
-                                         i_actv.reshape(L*N, I))
+                                         i_actv.transpose(0, 1).reshape(L*N, I))
         if weight_hh.requires_grad:
             grad_weight_hh = torch.matmul(grad_gates.reshape(L*N, 4*H).transpose(0, 1),
                                          h_actv.reshape(L*N, H))
@@ -123,7 +126,7 @@ class LSTMFunction(torch.autograd.Function):
         if bidirectional:
             if weight_ih.requires_grad:
                 grad_weight_ih_reverse = torch.matmul(grad_gates_reverse.reshape(L*N, 4*H).transpose(0, 1),
-                                            i_actv.reshape(L*N, I))
+                                            i_actv.transpose(0, 1).reshape(L*N, I))
             if weight_hh.requires_grad:
                 grad_weight_hh_reverse = torch.matmul(grad_gates_reverse.reshape(L*N, 4*H).transpose(0, 1),
                                             h_actv_reverse.reshape(L*N, H))

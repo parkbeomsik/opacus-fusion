@@ -61,6 +61,10 @@ class BahdanauAttention(nn.Module):
         self.linear_att = nn.Linear(num_units, 1, bias=False)
         nn.init.uniform_(self.linear_att.weight.data, -init_weight, init_weight)
 
+        # self.linear_q.requires_grad_(False)
+        # self.linear_k.requires_grad_(False)
+        # self.linear_att.requires_grad_(False)
+
         self.mask = None
 
         if self.normalize:

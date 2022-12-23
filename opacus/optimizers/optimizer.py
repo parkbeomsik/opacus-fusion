@@ -29,10 +29,12 @@ from opacus.utils.module_utils import trainable_modules
 from opt_einsum.contract import contract
 from torch import nn
 from torch.optim import Optimizer
+from torch.nn import functional as F
 
 import grad_example_module
 
 from opacus.profiler import profiler, total_ignored_time
+from opacus.profiler import start_timer, pause_timer, stop_timer, get_elapsed_time
 from opacus.layers.dp_fast_rnn import DPFASTLSTM
 
 
@@ -426,7 +428,7 @@ class DPOptimizer(Optimizer):
             # print("per_sample_norms")
             # print(per_sample_norms)
             # print("scaling_factors")
-            # print(per_sample_clip_factor*100)
+            # print(per_sample_clip_factor)
 
             for p in self.params:
                 _check_processed_flag(p.grad_sample)
@@ -440,6 +442,10 @@ class DPOptimizer(Optimizer):
                     p.summed_grad += PerBatchGrads(grad)
                 else:
                     p.summed_grad = PerBatchGrads(grad)
+
+                # print(p.shape)
+                # print(p.summed_grad)
+                # exit(0)
 
                 _mark_as_processed(p.grad_sample)
 
@@ -486,34 +492,66 @@ class DPOptimizer(Optimizer):
 
             # This can be removed using better implementation
             # So, we will ignore time for this second propagation
-            # torch.cuda.synchronize()
-            # start = time.time()
-
+            torch.cuda.synchronize()
+            start = time.time()
+            pause_timer()
+            # print(input)
             if config.grad_sample_mode == "hooks":
                 if config.model_type == "cnn" or config.model_type == "rnn":
                     output = self.module(*input)
                 if config.model_type == "transformer":
-                    output = self.module(*input, return_dict=False)[0]
+                    if config.benchmark:
+                        output = self.module(*input, return_dict=False)[0]
+                    else:
+                        # input.pop("labels")
+                        # for k,v in input.items():
+                        #     input[k] = v.cuda()
+                        target = target.cuda()
+                        output = self.module(**input, return_dict=False)[0]
             elif config.grad_sample_mode == "ew":
                 if config.model_type == "cnn" or config.model_type == "rnn":
                     output = self.module.forward_batch(*input)
                 if config.model_type == "transformer":
                     output = self.module.forward_batch(*input, return_dict=False)[0]
-
+                    
+            # print(output)
+            # print(target)
             loss = criterion(output, target)
-            loss = (loss * per_sample_clip_factor).mean()
+            # loss = F.cross_entropy(output, target, reduction="none")
+            # print(loss)
 
-            # profiler.reset_time()
+            # print(per_sample_clip_factor)
+
+            if config.architecture == "gnmt":
+                loss = loss.sum(dim=1)
+            if self.loss_reduction == "sum":
+                loss = (loss * per_sample_clip_factor).sum()
+            else:
+                loss = (loss * per_sample_clip_factor).sum() # / (1024 / 16)
+                # loss = loss.sum()
+
+            # print(loss)
+
             torch.cuda.synchronize()
-            # total_ignored_time.append(time.time() - start)
+            profiler.reset_time()
+            total_ignored_time.append(time.time() - start)
+            start_timer()
+            
 
             ## Second backpropagation (get per-batch gradient)
             loss.backward()
 
             self.module.enable_hooks()
 
+            batch_size = per_sample_clip_factor.shape[0]
             for p in self.params:
-                p.summed_grad = PerBatchGrads(p.grad)
+                if p.summed_grad is not None:
+                    p.summed_grad += PerBatchGrads(p.grad)
+                else:
+                    p.summed_grad = PerBatchGrads(p.grad)
+                # print(p.shape)
+                # print(p.summed_grad)
+                # exit(0)
                 p.grad = None
 
             profiler.record("Clip/reduce")
@@ -634,6 +672,7 @@ class DPOptimizer(Optimizer):
                         linear_activations, linear_grad_outputs,
                         self.loss_reduction == "mean",
                         self.batch_size, self.max_grad_norm, self.noise_multiplier,
+                        config.adaptive_clipping,
                         config.quantization, 
                         config.verbose, config.profile_time, config.profile_memory)
 
@@ -643,7 +682,8 @@ class DPOptimizer(Optimizer):
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
                 profiler.add_memory_explicit("Workspace", result_grad_example_module.get_workspace_size())
-                print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
+                profiler.accumulate_memory_explicit("Per-example weight gradients", result_grad_example_module.get_per_example_gradient_size())
+                # print(f"Workspace size = {result_grad_example_module.get_workspace_size()}")
 
                 per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_grads = result_grad_example_module.get_per_batch_grads()
 
@@ -698,6 +738,8 @@ class DPOptimizer(Optimizer):
                             out_features = layer.grad_outputs[0].shape[2]
                             self.gemm_key_order.append((N, seq_len, in_features, out_features))
                             num_layers_dict[(N, seq_len, in_features, out_features)] += 1
+
+                    # print(self.module)
 
                     self.gemm_key_order = list(set(self.gemm_key_order))
                     self.gemm_key_order = sorted(self.gemm_key_order, key=lambda x: x[2]*x[3])
@@ -783,17 +825,18 @@ class DPOptimizer(Optimizer):
                 precomputed_norms = [torch.stack(linear_last_norms, dim=1).norm(2, dim=1)]
                 
                 profiler.record("Clip/reduce")
-
+                # print(f"############## {self.max_grad_norm*self.noise_multiplier}")
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
                     grad_example_module.get_clip_and_reduced_grads_linear(self.configs, activations, grad_outputs,
-                                                                precomputed_grads, precomputed_norms,
-                                                                linear_last_activations, linear_last_grad_outputs,
-                                                                embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
-                                                                self.loss_reduction == "mean",
-                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier,
-                                                                config.quantization, 
-                                                                config.verbose, config.profile_time, config.profile_memory)
+                        precomputed_grads, precomputed_norms,
+                        linear_last_activations, linear_last_grad_outputs,
+                        embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                        self.loss_reduction == "mean",
+                        self.batch_size, self.max_grad_norm, self.noise_multiplier if not kwargs["check_skip_next_step"] else 0,
+                        config.adaptive_clipping,
+                        config.quantization, 
+                        config.verbose, config.profile_time, config.profile_memory)
                 # print(f"Start Python {time.time_ns()}")
                 start = time.time()
 
@@ -802,6 +845,7 @@ class DPOptimizer(Optimizer):
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+                profiler.accumulate_memory_explicit("Per-example weight gradients", result_grad_example_module.get_per_example_gradient_size())
 
                 per_batch_grads, \
                 per_batch_grads_from_precomputed, \
@@ -815,7 +859,10 @@ class DPOptimizer(Optimizer):
                 embedding_idx = 0
 
                 for layer in self.embedding_list:
-                    layer.weight.summed_grad = PerBatchGrads(per_batch_embedding_grads[embedding_idx])
+                    if layer.weight.summed_grad is not None:
+                        layer.weight.summed_grad += PerBatchGrads(per_batch_embedding_grads[embedding_idx])
+                    else:
+                        layer.weight.summed_grad = PerBatchGrads(per_batch_embedding_grads[embedding_idx])
                     embedding_idx += 1
 
                     # Clean activations and grad_outputs
@@ -823,12 +870,18 @@ class DPOptimizer(Optimizer):
                     layer.grad_outputs = []
 
                 for layer in self.linear_last_list:
-                    layer.weight.summed_grad = PerBatchGrads(per_batch_linear_last_grads[last_linear_idx])
+                    if layer.weight.summed_grad is not None:
+                        layer.weight.summed_grad += PerBatchGrads(per_batch_linear_last_grads[last_linear_idx])
+                    else:
+                        layer.weight.summed_grad = PerBatchGrads(per_batch_linear_last_grads[last_linear_idx])
                     last_linear_idx += 1
 
                     # Set per-batch grads of pre-computed layers
                     if layer.bias is not None:
-                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        if layer.bias.summed_grad is not None:
+                            layer.bias.summed_grad += PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        else:
+                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
                         precomputed_idx += 1
 
                     # Clean activations and grad_outputs
@@ -837,10 +890,16 @@ class DPOptimizer(Optimizer):
                     layer.weight.grad_sample_norms = None
 
                 for layer in self.layer_norm_list:
-                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    if layer.weight.summed_grad is not None:
+                        layer.weight.summed_grad += PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                    else:
+                        layer.weight.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
                     precomputed_idx += 1
                     if layer.bias is not None:
-                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        if layer.bias.summed_grad is not None:
+                            layer.bias.summed_grad += PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        else:
+                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
                         precomputed_idx += 1
 
                     # Clean activations and grad_outputs
@@ -853,12 +912,18 @@ class DPOptimizer(Optimizer):
                     out_features = layer.grad_outputs[0].shape[2]
 
                     gemm_idx = self.gemm_key_order.index((N, seq_len, in_features, out_features))
-                    layer.weight.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    if layer.weight.summed_grad is not None:
+                        layer.weight.summed_grad += PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
+                    else:
+                        layer.weight.summed_grad = PerBatchGrads(per_batch_grads[key_gemm_idx[gemm_idx]])
                     key_gemm_idx[gemm_idx] += 1
 
                     # Set per-batch grads of pre-computed layers
                     if layer.bias is not None:
-                        layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        if layer.bias.summed_grad is not None:
+                            layer.bias.summed_grad += PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
+                        else:
+                            layer.bias.summed_grad = PerBatchGrads(per_batch_grads_from_precomputed[precomputed_idx])
                         precomputed_idx += 1
 
                     # Clean activations and grad_outputs
@@ -1067,18 +1132,21 @@ class DPOptimizer(Optimizer):
                 # Compute accumulated per-batch gradient and scaling_factors
                 result_grad_example_module = \
                     grad_example_module.get_clip_and_reduced_grads_linear(self.configs, activations, grad_outputs,
-                                                                precomputed_grads, precomputed_norms,
-                                                                linear_last_activations, linear_last_grad_outputs,
-                                                                embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
-                                                                self.loss_reduction == "mean",
-                                                                self.batch_size, self.max_grad_norm, self.noise_multiplier, config.quantization, 
-                                                                config.verbose, config.profile_time, config.profile_memory)
+                        precomputed_grads, precomputed_norms,
+                        linear_last_activations, linear_last_grad_outputs,
+                        embedding_activations, embedding_grad_outputs, embedding_vocab_sizes,
+                        self.loss_reduction == "mean",
+                        self.batch_size, self.max_grad_norm, self.noise_multiplier if not kwargs["check_skip_next_step"] else 0,
+                        config.adaptive_clipping,
+                        config.quantization, 
+                        config.verbose, config.profile_time, config.profile_memory)
 
                 # torch.cuda.synchronize()
                 profiler.start_interval_time = time.time()
                 profiler.add_time_explicit("Backward weight", result_grad_example_module.get_backward_weight_ms())
                 profiler.add_time_explicit("Clip/reduce", result_grad_example_module.get_clip_reduce_ms())
                 profiler.add_time_explicit("Add noise", result_grad_example_module.get_add_noise_ms())
+                profiler.accumulate_memory_explicit("Per-example weight gradients", result_grad_example_module.get_per_example_gradient_size())
 
                 per_batch_grads, \
                 per_batch_grads_from_precomputed, \
@@ -1224,7 +1292,7 @@ class DPOptimizer(Optimizer):
         for p in self.params:
             if not config.dpsgd_mode == MODE_ELEGANT:
                 _check_processed_flag(p.summed_grad)
-            
+                # print(self.noise_multiplier * self.max_grad_norm)
                 noise = _generate_noise(
                     std=self.noise_multiplier * self.max_grad_norm,
                     reference=p.summed_grad,
@@ -1303,17 +1371,22 @@ class DPOptimizer(Optimizer):
             closure: A closure that reevaluates the model and
                 returns the loss. Optional for most optimizers.
         """
-        self.clip_and_accumulate(**kwargs)
-        profiler.record("Clip/reduce")
+        check_skip_next_step = self._check_skip_next_step()
+        kwargs["check_skip_next_step"] = check_skip_next_step
 
-        if self._check_skip_next_step():
+        self.clip_and_accumulate(**kwargs)
+
+        if check_skip_next_step:
             self._is_last_step_skipped = True
             return False
 
-        self.add_noise()
-        self.scale_grad()
+        profiler.record("Clip/reduce")
 
+        self.add_noise()
         profiler.record("Add noise")
+
+        self.scale_grad()
+        profiler.record("Clip/reduce")
 
         # Save gradients
         if config.grad_save_path:

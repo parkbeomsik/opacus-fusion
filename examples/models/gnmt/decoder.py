@@ -59,7 +59,7 @@ class RecurrentAttention(nn.Module):
         self.attn = BahdanauAttention(hidden_size, context_size, context_size,
                                       normalize=False, batch_first=batch_first)
 
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(dropout, inplace=False)
 
     def forward(self, inputs, hidden, context, context_len):
         """
@@ -167,7 +167,7 @@ class ResidualRecurrentDecoder(nn.Module):
                              init_weight)
 
         self.classifier = Classifier(hidden_size, vocab_size)
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=dropout, inplace=False)
 
     def init_hidden(self, hidden):
         """

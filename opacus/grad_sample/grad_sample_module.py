@@ -64,7 +64,6 @@ def create_or_accumulate_grad_sample(
         else:
             # if config.dpsgd_mode == MODE_NAIVE or config.dpsgd_mode == MODE_REWEIGHT:
             # gc.collect()
-            profiler.record("Backward weight")
             # zero = PerSampleGrads(torch.zeros(
             #     torch.Size([max_batch_len]) + grad_sample.shape[1:],
             #     device=grad_sample.device,
@@ -72,13 +71,24 @@ def create_or_accumulate_grad_sample(
             # ))
             # profiler.record_memory()
             # param._current_grad_sample = zero
+            profiler.record("Backward weight")
             
+            # Since it "aligns" per-example gradients and accelerates further clip and reduce operation,
+            # I marked it as a clip/reduce.
+            # grad_example : column major
             # param._current_grad_sample[: grad_sample.shape[0]] = grad_sample
-            profiler.record("Clip/reduce")
-            
+            # profiler.record("Clip/reduce")
+            # param._current_grad_sample : row major -> 이러면 뒤에서 clip and reduce 가 빨라짐
+
             param._current_grad_sample = grad_sample
+            # profiler.record("Backward weight")
 
-
+    # if param.requires_grad_opacus:
+    #     if hasattr(param, "_current_grad_sample"):
+    #         param._current_grad_sample[: grad_sample.shape[0]] += grad_sample
+    #     else:
+    #         param._current_grad_sample = grad_sample
+            
 def promote_current_grad_sample(p: nn.Parameter) -> None:
     if p.requires_grad_opacus:
         if config.dpsgd_mode == MODE_REWEIGHT or config.dpsgd_mode == MODE_ELEGANT:
@@ -399,6 +409,7 @@ class GradSampleModule(AbstractGradSampleModule):
         else:
             grad_sampler_fn = ft_compute_per_sample_gradient
 
+        # print(type(module))
         grad_samples = grad_sampler_fn(module, activations, backprops)
         for param, gs in grad_samples.items():
             create_or_accumulate_grad_sample(
@@ -412,22 +423,30 @@ class GradSampleModule(AbstractGradSampleModule):
             p._forward_counter -= 1
             if p._forward_counter == 0:
                 promote_current_grad_sample(p)
+                if loss_reduction == "mean" and config.model_type != "cnn":
+                    if (hasattr(p, "grad_sample") 
+                        and p.grad_sample is not None
+                        and p.requires_grad_opacus):
+                        # p.grad_sample = p.grad_sample * p.grad_sample.shape[0]
+                        pass
 
         # For reweight DP-SGD, compute norm of each parameters
         if config.dpsgd_mode == MODE_REWEIGHT:
-            profiler.record("Backward weight")
+            # profiler.record("Backward weight")
             for _, p in trainable_parameters(module):
                 if p._forward_counter == 0 and p.requires_grad_opacus:
-                    p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
-                    
-                    # For positional embeddings in transformer
-                    # print(p.grad_sample_norms[0].shape)
-                    # if p.grad_sample_norms[0].shape[0] == 1:
-                    #     p.grad_sample_norms = [p.grad_sample_norms[0].expand(module.max_batch_len)]
+                    if hasattr(p, "grad_sample") and p.grad_sample is not None:
+                        p.grad_sample_norms = [p.grad_sample.norm(2, dim=list(range(1, len(p.grad_sample.shape))))]
+                        
+                        # For positional embeddings in transformer
+                        # print(p.grad_sample_norms[0].shape)
+                        # if p.grad_sample_norms[0].shape[0] == 1:
+                        #     p.grad_sample_norms = [p.grad_sample_norms[0].expand(module.max_batch_len)]
 
-                    del p.grad_sample
+                        del p.grad_sample
 
             profiler.record("Clip and reduce")
+        # print(torch.cuda.max_memory_allocated())
 
         if len(module.activations) == 0:
             if hasattr(module, "max_batch_len"):
@@ -517,11 +536,13 @@ class GradSampleModule(AbstractGradSampleModule):
             )
 
         n = module.max_batch_len
-        if loss_reduction == "mean":
+        if loss_reduction == "mean": # and config.model_type == "cnn":
             if is_rnn:
                 backprops = list(map(lambda b: b * n, backprops))
             else:
                 backprops = backprops * n
+        # elif loss_reduction == "mean":
+        #     backprops = backprops
         elif loss_reduction == "sum":
             backprops = backprops
         else:
@@ -537,6 +558,16 @@ class GradSampleModule(AbstractGradSampleModule):
             backprops = backprops.permute(
                 [batch_dim] + [x for x in range(backprops.dim()) if x != batch_dim]
             )
+
+        # Unique process for positional embedding
+        # since its activation and gradients are per-batch
+        if type(module) == nn.Embedding:
+            if activations.shape[0] == 1:
+                activations = activations.expand(config.batch_size, *activations.shape[1:])
+                module.activations = [activations]
+            if backprops.shape[0] == 1:
+                backprops = backprops.expand(config.batch_size, *backprops.shape[1:])
+                module.max_batch_len = config.batch_size
 
         return activations, backprops
 

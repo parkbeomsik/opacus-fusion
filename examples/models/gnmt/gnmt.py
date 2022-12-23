@@ -30,7 +30,7 @@ class GNMT(Seq2Seq):
     """
     GNMT v2 model
     """
-    def __init__(self, vocab_size=32000, hidden_size=1024, num_layers=8, dropout=0.2,
+    def __init__(self, vocab_size=32000, hidden_size=1024, num_layers=8, dropout=0.0,
                  batch_first=True, share_embedding=False):
         """
         Constructor for the GNMT v2 model.

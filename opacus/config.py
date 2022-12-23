@@ -10,13 +10,15 @@ model_type = "cnn"
 architecture = "gnmt"
 # example_wise = True
 dpsgd_mode = MODE_ELEGANT
-selective_reweight = True
+adaptive_clipping = True
 quantization = False
 grad_sample_mode = "hooks"
 
+benchmark = True
+
 batch_size = 0
 
-verbose = True
+verbose = False
 
 precomputed_grads = None
 

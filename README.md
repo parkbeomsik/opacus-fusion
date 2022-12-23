@@ -55,12 +55,14 @@ pip install -e .
 ## Run
 ### Profile time for all cases
 ```bash
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 cd $OPACUS_FUSION_PATH/examples
 python benchmark_scripts/profile_time_all.py
 ```
 
 ### Profile time
 ```bash
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 cd $OPACUS_FUSION_PATH/examples
 python benchmark.py --input_size 32 --model_type cnn --architecture resnet18 --dpsgd_mode naive --batch_size 16 --profile_time # DPSGD
 python benchmark.py --input_size 32 --model_type cnn --architecture resnet18 --dpsgd_mode reweight --batch_size 16 --profile_time # DPSGD(R)

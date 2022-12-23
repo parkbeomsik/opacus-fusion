@@ -34,7 +34,7 @@ __global__ void add_noise_cuda_kernel(
   while (c < num_elem){
     curandState s;
     curand_init(seed + c, 0, 0, &s);
-    m[c] += curand_uniform(&s) * noise_dev;
+    m[c] += curand_normal(&s) * noise_dev;
 
     c += blockDim.x * gridDim.x;
   }
@@ -50,6 +50,7 @@ void add_noise(torch::Tensor& tensor, float noise_dev) {
 
     std::mt19937 noise_gen((unsigned)std::time(NULL));
     unsigned long long seed = noise_dis(noise_gen);
+    // printf("%f\n", noise_dev);
     
     add_noise_cuda_kernel<<<blocks, threads, 0>>>(
         (float *) tensor.data_ptr(),

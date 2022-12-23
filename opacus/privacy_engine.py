@@ -36,6 +36,8 @@ from torch import nn, optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
+from opacus import config
+from opacus.config import MODE_NAIVE, MODE_REWEIGHT, MODE_ELEGANT
 
 def forbid_accumulation_hook(
     module: AbstractGradSampleModule,
@@ -65,6 +67,9 @@ def forbid_accumulation_hook(
 
     """
     if not module.training:
+        return
+
+    if config.dpsgd_mode == MODE_REWEIGHT:
         return
 
     for _, p in trainable_parameters(module):
@@ -510,6 +515,16 @@ class PrivacyEngine:
                 "so your overall privacy budget will be higher."
             )
 
+        self.noise_multiplier = get_noise_multiplier(
+            target_epsilon=target_epsilon,
+            target_delta=target_delta,
+            sample_rate=sample_rate,
+            epochs=epochs,
+            accountant=self.accountant.mechanism(),
+            **kwargs,
+        )
+        self.delta = target_delta
+
         return self.make_private(
             module=module,
             optimizer=optimizer,
@@ -531,7 +546,7 @@ class PrivacyEngine:
             clipping=clipping,
         )
 
-    def get_epsilon(self, delta):
+    def get_epsilon(self, delta=None):
         """
         Computes the (epsilon, delta) privacy budget spent so far.
 
@@ -541,6 +556,8 @@ class PrivacyEngine:
         Returns:
             Privacy budget (epsilon) expended so far.
         """
+        if delta == None:
+            delta = self.delta
         return self.accountant.get_epsilon(delta)
 
     def save_checkpoint(

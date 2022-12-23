@@ -254,6 +254,7 @@ void compute_single_per_example_gradient_embedding(torch::Tensor embedding_gradi
         offset += embedding_gradient_size;
 
         // std::cout << "Embedding norm, " << torch::frobenius_norm(embedding_gradient.flatten(), {0}, false) << std::endl;
+        // std::cout << "Embedding, " << embedding_gradient.flatten().index({Slice(1024, 1024+10)});
     } 
 }
 
@@ -346,7 +347,14 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
       }
     }
   }
-  
+  for (auto& actvs_flatten : actvs) {
+    for (auto& actv : actvs_flatten) {
+      if (!actv.is_contiguous()) {
+        actv = actv.contiguous();
+      }
+    }
+  }
+
   // Create tensor for embedding gradients
   int embedding_gradient_size = 0;
   std::vector<torch::Tensor> embedding_per_example_gradients;
@@ -476,7 +484,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   auto per_batch_gradient_from_precomputed = torch::sum(gathered_per_example_grads, {0});
   TIME_PROFILE(clip_reduce_ms, time_profile);
   // per_batch_gradient_from_precomputed.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient_from_precomputed.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
-  add_noise(per_batch_gradient_from_precomputed, max_norm*noise_multiplier);
+  add_noise(per_batch_gradient_from_precomputed, loss_reduction_mean ? max_norm*noise_multiplier/batch_count : max_norm*noise_multiplier);
   TIME_PROFILE(add_noise_ms, time_profile);
   // printf("5 Peak memory usage %ld\n", c10::cuda::CUDACachingAllocator::getDeviceStats(0).allocated_bytes.at(0).peak);
   std::vector<torch::Tensor> per_batch_grads_from_precomputed;
@@ -625,7 +633,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   at::cuda::setCurrentCUDAStream(at::cuda::getDefaultCUDAStream());
   TIME_PROFILE(clip_reduce_ms, time_profile);
   // per_batch_gradient.add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_gradient.sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
-  add_noise(per_batch_gradient, max_norm*noise_multiplier);
+  add_noise(per_batch_gradient, loss_reduction_mean ? max_norm*noise_multiplier/batch_count : max_norm*noise_multiplier);
   TIME_PROFILE(add_noise_ms, time_profile);
 
   std::vector<torch::Tensor> per_batch_linear_last_grads;
@@ -657,7 +665,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
     }
     TIME_PROFILE(clip_reduce_ms, time_profile);
     // per_batch_linear_last_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_linear_last_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
-    add_noise(per_batch_linear_last_grads.at(i), max_norm*noise_multiplier);
+    add_noise(per_batch_linear_last_grads.at(i), loss_reduction_mean ? max_norm*noise_multiplier/batch_count : max_norm*noise_multiplier);
     TIME_PROFILE(add_noise_ms, time_profile);
   }
 
@@ -697,7 +705,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
   TIME_PROFILE(clip_reduce_ms, time_profile);
   for (size_t i = 0; i < per_batch_embedding_grads.size(); ++i) {
     // per_batch_embedding_grads.at(i).add_(torch::normal(0.0, max_norm*noise_multiplier, per_batch_embedding_grads.at(i).sizes(), c10::nullopt, torch::TensorOptions().device(torch::kCUDA, 0)));
-    add_noise(per_batch_embedding_grads.at(i), max_norm*noise_multiplier);
+    add_noise(per_batch_embedding_grads.at(i), loss_reduction_mean ? max_norm*noise_multiplier/batch_count : max_norm*noise_multiplier);
     
   }
   TIME_PROFILE(add_noise_ms, time_profile);
@@ -706,7 +714,7 @@ ReturnType clip_and_reduce_grads_linear(std::vector<LinearConfig> &configs,
 
   // printf("Finish C++, %lld\n", std::chrono::high_resolution_clock::now().time_since_epoch().count());
 
-  return ReturnType({flat_per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_last_grads, per_batch_embedding_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, 0);
+  return ReturnType({flat_per_batch_grads, per_batch_grads_from_precomputed, per_batch_linear_last_grads, per_batch_embedding_grads}, backward_weight_ms, norm_ms, clip_reduce_ms, add_noise_ms, 0, ((size_t)Linear::partial_per_example_gradient_size + embedding_gradient_size) * 4);
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -726,6 +734,7 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
                                             int batch_count,
                                             float max_norm,
                                             float noise_multiplier,
+                                            bool adaptive_clpping,
                                             bool quant,
                                             bool verbose,
                                             bool profile_time,
@@ -754,90 +763,95 @@ ReturnType get_clip_and_reduced_grads_linear(std::vector<LinearConfig> &configs,
     auto increase_count = 0;
     
     // Profile to find best end-non-reweight-layer
-    for (size_t end_non_reweight_layer = 0; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) {
+    if (adaptive_clpping) {
+      for (size_t end_non_reweight_layer = 0; end_non_reweight_layer < configs.size() + 1; ++end_non_reweight_layer) {
 
-      // Compute non-reweight per-example gradient size
-      Linear::non_reweight_per_example_gradient_size = 0;
-      for (size_t i = 0; i < configs.size(); ++i) {
-        if (i < end_non_reweight_layer) {
-          for (size_t layer_idx = 0; layer_idx < configs.at(i).num_layers; ++layer_idx) {
-            Linear::non_reweight_per_example_gradient_size += (size_t)configs.at(i).in_features*configs.at(i).out_features;
+        // Compute non-reweight per-example gradient size
+        Linear::non_reweight_per_example_gradient_size = 0;
+        for (size_t i = 0; i < configs.size(); ++i) {
+          if (i < end_non_reweight_layer) {
+            for (size_t layer_idx = 0; layer_idx < configs.at(i).num_layers; ++layer_idx) {
+              Linear::non_reweight_per_example_gradient_size += (size_t)configs.at(i).in_features*configs.at(i).out_features;
+            }
           }
         }
-      }
 
-      // Warm up
-      for (int i = 0; i < 3; ++i) {
-        auto _ = clip_and_reduce_grads_linear(configs,
-                                              actvs,
-                                              ograds,
-                                              precomputed_per_example_grads,
-                                              precomputed_per_example_grad_norms,
-                                              linear_last_actvs,
-                                              linear_last_ograds,
-                                              embedding_actvs,
-                                              embedding_ograds,
-                                              embedding_vocab_sizes,
-                                              end_non_reweight_layer,
-                                              loss_reduction_mean,
-                                              batch_count,
-                                              max_norm,
-                                              noise_multiplier,
-                                              quant,
-                                              false,
-                                              false,
-                                              false); 
-      }
+        // Warm up
+        for (int i = 0; i < 3; ++i) {
+          auto _ = clip_and_reduce_grads_linear(configs,
+                                                actvs,
+                                                ograds,
+                                                precomputed_per_example_grads,
+                                                precomputed_per_example_grad_norms,
+                                                linear_last_actvs,
+                                                linear_last_ograds,
+                                                embedding_actvs,
+                                                embedding_ograds,
+                                                embedding_vocab_sizes,
+                                                end_non_reweight_layer,
+                                                loss_reduction_mean,
+                                                batch_count,
+                                                max_norm,
+                                                noise_multiplier,
+                                                quant,
+                                                false,
+                                                false,
+                                                false); 
+        }
 
-      checkCudaErrors(cudaDeviceSynchronize());
-      auto startTime = std::chrono::high_resolution_clock::now();
+        checkCudaErrors(cudaDeviceSynchronize());
+        auto startTime = std::chrono::high_resolution_clock::now();
 
-      // Run clip_and_reduce_grads
-      for (int i = 0; i < 10; ++i) {
-        auto _ = clip_and_reduce_grads_linear(configs,
-                                              actvs,
-                                              ograds,
-                                              precomputed_per_example_grads,
-                                              precomputed_per_example_grad_norms,
-                                              linear_last_actvs,
-                                              linear_last_ograds,
-                                              embedding_actvs,
-                                              embedding_ograds,
-                                              embedding_vocab_sizes,
-                                              end_non_reweight_layer,
-                                              loss_reduction_mean,
-                                              batch_count,
-                                              max_norm,
-                                              noise_multiplier,
-                                              quant,
-                                              false,
-                                              false,
-                                              false); 
-      }
+        // Run clip_and_reduce_grads
+        for (int i = 0; i < 10; ++i) {
+          auto _ = clip_and_reduce_grads_linear(configs,
+                                                actvs,
+                                                ograds,
+                                                precomputed_per_example_grads,
+                                                precomputed_per_example_grad_norms,
+                                                linear_last_actvs,
+                                                linear_last_ograds,
+                                                embedding_actvs,
+                                                embedding_ograds,
+                                                embedding_vocab_sizes,
+                                                end_non_reweight_layer,
+                                                loss_reduction_mean,
+                                                batch_count,
+                                                max_norm,
+                                                noise_multiplier,
+                                                quant,
+                                                false,
+                                                false,
+                                                false); 
+        }
 
-      checkCudaErrors(cudaDeviceSynchronize());
-      auto endTime = std::chrono::high_resolution_clock::now();
+        checkCudaErrors(cudaDeviceSynchronize());
+        auto endTime = std::chrono::high_resolution_clock::now();
 
-      auto runtime_us = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
-      if (runtime_us < min_runtime_us) {
-        Linear::best_end_non_reweight_layer = end_non_reweight_layer;
-        min_runtime_us = runtime_us;
-      }
-      if (runtime_us <= prev_runtime_us) {
-        increase_count = std::max(0, increase_count - 1);
-      }
-      else {
-        increase_count += 1;
-      }
-      if (increase_count == 4) {
-        break;
-      }
-      prev_runtime_us = runtime_us;
+        auto runtime_us = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime);
+        if (runtime_us < min_runtime_us) {
+          Linear::best_end_non_reweight_layer = end_non_reweight_layer;
+          min_runtime_us = runtime_us;
+        }
+        if (runtime_us <= prev_runtime_us) {
+          increase_count = std::max(0, increase_count - 1);
+        }
+        else {
+          increase_count += 1;
+        }
+        if (increase_count == 4) {
+          break;
+        }
+        prev_runtime_us = runtime_us;
 
-      std::ostringstream stringStream;
-      stringStream << "Current end non-reweight layer = " << end_non_reweight_layer << ", runtime = " << runtime_us.count() << " us";
-      std::string copyOfStr = stringStream.str();
-      LOG_STDERR(copyOfStr, true);
+        std::ostringstream stringStream;
+        stringStream << "Current end non-reweight layer = " << end_non_reweight_layer << ", runtime = " << runtime_us.count() << " us";
+        std::string copyOfStr = stringStream.str();
+        LOG_STDERR(copyOfStr, true);
+      }
+    }
+    else {
+      Linear::best_end_non_reweight_layer = configs.size();
     }
 
     std::ostringstream stringStream;

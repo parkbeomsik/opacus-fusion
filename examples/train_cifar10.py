@@ -26,6 +26,8 @@ import os
 import sys
 from datetime import datetime, timedelta
 from inspect import getframeinfo, stack
+import time
+import random
 
 import numpy as np
 import torch
@@ -37,16 +39,35 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 from opacus import PrivacyEngine
 from opacus.distributed import DifferentiallyPrivateDistributedDataParallel as DPDDP
+from opacus.utils.batch_memory_manager import BatchMemoryManager
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import TensorDataset
 from torchvision import models
+from torch.optim.lr_scheduler import _LRScheduler
 from tqdm import tqdm
 
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, CIFAR100
 from models.resnet import resnet18, resnet50, resnet152
 
 from opacus.profiler import profiler, total_ignored_time
 from opacus import config
+
+class WarmUpLR(_LRScheduler):
+    """warmup_training learning rate scheduler
+    Args:
+        optimizer: optimzier(e.g. SGD)
+        total_iters: totoal_iters of warmup phase
+    """
+    def __init__(self, optimizer, total_iters, last_epoch=-1):
+
+        self.total_iters = total_iters
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        """we will use the first m batches, and set the learning
+        rate to base_lr * m / total_iters
+        """
+        return [base_lr * self.last_epoch / (self.total_iters + 1e-8) for base_lr in self.base_lrs]
 
 logging.basicConfig(
     format="%(asctime)s:%(levelname)s:%(message)s",
@@ -56,159 +77,26 @@ logging.basicConfig(
 logger = logging.getLogger("ddp")
 logger.setLevel(level=logging.INFO)
 
+best_acc1 = 0
 
-def print_args(args):
-    print("==================================================================")
-    print("                          Configuration                           ")
-    print("==================================================================")
-    print(f"DPSGD mode       : {args.dpsgd_mode}")
-    print(f"Quantization     : {args.quant}")
-    print(f"Model type       : {args.model_type}")
-    print(f"Architecture     : {args.architecture}")
-    print(f"Batch size       : {args.batch_size}")
+def str_args(args):
+    ret = ""
+    ret += "==================================================================\n"
+    ret += "                          Configuration                           \n"
+    ret += "==================================================================\n"
+    # ret += f"DPSGD mode       : {args.dpsgd_mode}\n"
+    # ret += f"Model type       : cnn\n"
+    # ret += f"Architecture     : {args.architecture}\n"
+    # ret += f"Batch size       : {args.batch_size}\n"
+    for k, v in vars(args).items():
+        ret += f"{k:<30}: {v}\n"
+
+    return(ret)
 
 def accuracy(preds, labels):
     return (preds == labels).mean()
 
-def train(args, model, train_loader, optimizer, privacy_engine, epoch, device):
-    start_time = datetime.now()
-
-    model.train()
-    criterion = nn.CrossEntropyLoss()
-    criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="mean")
-
-    losses = []
-    top1_acc = []
-
-    for i, (images, target) in enumerate(tqdm(train_loader)):
-
-        images = images.to(device).to(memory_format=torch.channels_last)
-        target = target.to(device)
-
-        # compute output
-        output = model(images)
-        
-        loss = criterion(output, target)
-        preds = np.argmax(output.detach().cpu().numpy(), axis=1)
-        labels = target.detach().cpu().numpy()
-
-        # measure accuracy and record loss
-        acc1 = accuracy(preds, labels)
-        top1_acc.append(acc1)
-
-        # compute gradient and do SGD step
-        loss.backward()
-
-        losses.append(loss.item())
-
-        # make sure we take a step after processing the last mini-batch in the
-        # epoch to ensure we start the next epoch with a clean state
-        if args.disable_dp:
-            optimizer.step()
-        else:
-            optimizer.step(input = images, criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
-        optimizer.zero_grad()
-
-        if i % args.print_freq == 0:
-            if not args.disable_dp:
-                epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
-                print(
-                    f"\tTrain Epoch: {epoch} \t"
-                    f"Loss: {np.mean(losses):.6f} "
-                    f"Acc@1: {np.mean(top1_acc):.6f} "
-                    f"(ε = {epsilon:.2f}, δ = {args.delta})"
-                )
-            else:
-                print(
-                    f"\tTrain Epoch: {epoch} \t"
-                    f"Loss: {np.mean(losses):.6f} "
-                    f"Acc@1: {np.mean(top1_acc):.6f} "
-                )
-    train_duration = datetime.now() - start_time
-    return train_duration
-
-
-def test(args, model, test_loader, device):
-    model.eval()
-    criterion = nn.CrossEntropyLoss()
-    losses = []
-    top1_acc = []
-
-    with torch.no_grad():
-        for images, target in tqdm(test_loader):
-            images = images.to(device)
-            target = target.to(device)
-
-            output = model(images)
-            loss = criterion(output, target)
-            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
-            labels = target.detach().cpu().numpy()
-            acc1 = accuracy(preds, labels)
-
-            losses.append(loss.item())
-            top1_acc.append(acc1)
-
-    top1_avg = np.mean(top1_acc)
-
-    print(f"\tTest set:" f"Loss: {np.mean(losses):.6f} " f"Acc@1: {top1_avg :.6f} ")
-    return np.mean(top1_acc)
-
-def main():  # noqa: C901
-    # torch.backends.cudnn.benchmark = False
-    # torch.use_deterministic_algorithms(True)
-
-    world_size = 1
-
-    args = parse_args()
-
-    print_args(args)
-
-    if args.dpsgd_mode == "naive":
-        config.dpsgd_mode = config.MODE_NAIVE
-    elif args.dpsgd_mode == "reweight":
-        config.dpsgd_mode = config.MODE_REWEIGHT
-    elif args.dpsgd_mode == "elegant":
-        config.dpsgd_mode = config.MODE_ELEGANT
-
-    config.grad_sample_mode = args.grad_sample_mode
-    config.quantization = args.quant
-
-    config.profile_value = args.profile_value
-    if config.profile_value:
-        args.warm_up_steps = 0
-        args.steps = 1
-        if (args.model_load_path is None
-            or args.input_load_path is None
-            or args.grad_save_path is None):
-            assert 0, "Config is wrong."
-
-    config.profile_throughput = args.profile_throughput
-    config.profile_time = args.profile_time # or args.profile_throughput
-    config.profile_memory = args.profile_memory
-    config.verbose = args.verbose
-
-    config.model_type = "cnn"
-    config.architecture = args.architecture
-    config.batch_size = args.batch_size
-
-    config.grad_save_path = args.grad_save_path
-
-    B = args.batch_size
-
-    # Prepare model
-    if args.architecture == "resnet18":
-        model = resnet18(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=10)
-    elif args.architecture == "resnet50":
-        model = resnet50(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=10)
-    elif args.architecture == "resnet152":
-        model = resnet152(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=10)
-    else:
-        model = models.__dict__[args.architecture](
-            pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c))
-        )
-
-    model = model.to(memory_format=torch.channels_last)
-
+def prepare_cifar10(args):
     # Prepare dataset
     augmentations = [
         transforms.RandomCrop(32, padding=4),
@@ -245,7 +133,267 @@ def main():  # noqa: C901
         shuffle=False,
         num_workers=args.workers,
     )
+    
+    return train_loader, test_loader
 
+def prepare_cifar100(args):
+    # Prepare dataset
+    augmentations = [
+        transforms.RandomCrop(32, padding=4),
+        transforms.RandomHorizontalFlip(),
+    ]
+    normalize = [
+        transforms.ToTensor(),
+        transforms.Normalize(
+            (0.5070751592371323, 0.48654887331495095, 0.4409178433670343), 
+            (0.2673342858792401, 0.2564384629170883, 0.27615047132568404)),
+    ]
+    train_transform = transforms.Compose(
+        augmentations + normalize if args.disable_dp else normalize
+    )
+
+    test_transform = transforms.Compose(normalize)
+
+    train_dataset = CIFAR100(
+        root=args.data_root, train=True, download=True, transform=train_transform
+    )
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        generator=None,
+        num_workers=args.workers,
+        pin_memory=True,
+    )
+
+    test_dataset = CIFAR100(
+        root=args.data_root, train=False, download=True, transform=test_transform
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=args.batch_size_test,
+        shuffle=False,
+        num_workers=args.workers,
+    )
+
+    return train_loader, test_loader
+
+def train_non_private(args, model, train_loader, optimizer, privacy_engine, epoch, device, warmup_scheduler=None):
+    start_time = datetime.now()
+
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="none")
+
+    losses = []
+    top1_acc = []
+    
+    for i, (images, target) in enumerate(tqdm(train_loader)):
+
+        images = images.to(device).to(memory_format=torch.channels_last)
+        target = target.to(device)
+
+        # compute output
+        output = model(images)
+        
+        loss = criterion(output, target)
+        preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+        labels = target.detach().cpu().numpy()
+
+        # measure accuracy and record loss
+        acc1 = accuracy(preds, labels)
+        top1_acc.append(acc1)
+
+        # compute gradient and do SGD step
+        loss.backward()
+
+        losses.append(loss.item())
+
+        # make sure we take a step after processing the last mini-batch in the
+        # epoch to ensure we start the next epoch with a clean state
+        if args.disable_dp:
+            optimizer.step()
+        else:
+            optimizer.step(input = [images], criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
+        optimizer.zero_grad()
+
+        if epoch < 1:
+            warmup_scheduler.step()
+
+        if i % args.print_freq == 0:
+            if not args.disable_dp:
+                epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+                print(
+                    f"\tTrain Epoch: {epoch} \t"
+                    f"Loss: {np.mean(losses):.6f} "
+                    f"Acc@1: {np.mean(top1_acc):.6f} "
+                    f"(ε = {epsilon:.2f}, δ = {args.delta})"
+                )
+            else:
+                print(
+                    f"\tTrain Epoch: {epoch} \t"
+                    f"Loss: {np.mean(losses):.6f} "
+                    f"Acc@1: {np.mean(top1_acc):.6f} "
+                )
+    train_duration = datetime.now() - start_time
+    return train_duration
+
+def train(args, model, train_loader, optimizer, privacy_engine, epoch, device):
+    start_time = datetime.now()
+
+    model.train()
+    criterion = nn.CrossEntropyLoss()
+    criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="none")
+
+    losses = []
+    top1_acc = []
+
+    if args.physical_batch_size == -1:
+        physical_batch_size = args.batch_size
+    else:
+        physical_batch_size = args.physical_batch_size
+
+    with BatchMemoryManager(
+        data_loader=train_loader, max_physical_batch_size=physical_batch_size, optimizer=optimizer
+        ) as new_train_loader:
+        for i, (images, target) in enumerate(tqdm(new_train_loader)):
+
+            images = images.to(device).to(memory_format=torch.channels_last)
+            target = target.to(device)
+
+            # compute output
+            output = model(images)
+            
+            loss = criterion(output, target)
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = target.detach().cpu().numpy()
+
+            # measure accuracy and record loss
+            acc1 = accuracy(preds, labels)
+            top1_acc.append(acc1)
+
+            # compute gradient and do SGD step
+            loss.backward()
+
+            losses.append(loss.item())
+
+            # make sure we take a step after processing the last mini-batch in the
+            # epoch to ensure we start the next epoch with a clean state
+            if args.disable_dp:
+                optimizer.step()
+            else:
+                optimizer.step(input = [images], criterion = criterion_func_non_reduction, target=target.cuda(non_blocking=True))
+            optimizer.zero_grad()
+
+            if i % args.print_freq == 0:
+                if not args.disable_dp:
+                    epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+                    print(
+                        f"\tTrain Epoch: {epoch} \t"
+                        f"Loss: {np.mean(losses):.6f} "
+                        f"Acc@1: {np.mean(top1_acc):.6f} "
+                        f"(ε = {epsilon:.2f}, δ = {args.delta})"
+                    )
+                else:
+                    print(
+                        f"\tTrain Epoch: {epoch} \t"
+                        f"Loss: {np.mean(losses):.6f} "
+                        f"Acc@1: {np.mean(top1_acc):.6f} "
+                    )
+    train_duration = datetime.now() - start_time
+    return train_duration
+
+
+def test(args, model, test_loader, device):
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    losses = []
+    top1_acc = []
+
+    with torch.no_grad():
+        for images, target in tqdm(test_loader):
+            images = images.to(device)
+            target = target.to(device)
+
+            output = model(images)
+            loss = criterion(output, target)
+            preds = np.argmax(output.detach().cpu().numpy(), axis=1)
+            labels = target.detach().cpu().numpy()
+            acc1 = accuracy(preds, labels)
+
+            losses.append(loss.item())
+            top1_acc.append(acc1)
+
+    top1_avg = np.mean(top1_acc)
+
+    print(f"\tTest set:" f"Loss: {np.mean(losses):.6f} " f"Acc@1: {top1_avg :.6f} ")
+    return np.mean(top1_acc)
+
+def main():  # noqa: C901
+    torch.manual_seed(0)
+    random.seed(0)
+    np.random.seed(0)
+    # torch.backends.cudnn.benchmark = False
+    # torch.use_deterministic_algorithms(True)
+
+    world_size = 1
+
+    args = parse_args()
+
+    print(str_args(args))
+
+    if args.dpsgd_mode == "naive":
+        config.dpsgd_mode = config.MODE_NAIVE
+    elif args.dpsgd_mode == "reweight":
+        config.dpsgd_mode = config.MODE_REWEIGHT
+    elif args.dpsgd_mode == "elegant":
+        config.dpsgd_mode = config.MODE_ELEGANT
+
+    config.grad_sample_mode = args.grad_sample_mode
+    config.adaptive_clipping = True
+
+    config.verbose = args.verbose
+
+    config.model_type = "cnn"
+    config.architecture = args.architecture
+    config.batch_size = args.batch_size
+
+    B = args.batch_size
+
+    # Prepare dataset
+    if args.dataset == "cifar10":
+        train_loader, test_loader = prepare_cifar10(args)
+        num_classes = 10
+    elif args.dataset == "cifar100":
+        train_loader, test_loader = prepare_cifar100(args)
+        num_classes = 100
+    else:
+        raise ValueError(f"Unsupported dataset name, which is '{args.dataset}'")
+
+    # Prepare model
+    if args.architecture == "resnet18":
+        model = resnet18(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=num_classes)
+    elif args.architecture == "resnet50":
+        model = resnet50(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=num_classes)
+    elif args.architecture == "resnet152":
+        model = resnet152(pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c)), num_classes=num_classes)
+    else:
+        model = models.__dict__[args.architecture](
+            pretrained=False, norm_layer=(lambda c: nn.GroupNorm(args.gn_groups, c))
+        )
+
+    model = model.to(memory_format=torch.channels_last)
+    if args.pretrained_path:
+        def is_load_module(name):
+            ignore_modules = ["fc.weight", "fc.bias"]
+            for ignore_name in ignore_modules:
+                if ignore_name in name:
+                    return False
+            return True
+            
+        pretrained_dict = torch.load(args.pretrained_path)
+        pretrained_dict = {k: v for k, v in pretrained_dict.items() if is_load_module(k)}
+        model.load_state_dict(torch.load(pretrained_dict))
 
     model.train()
     model = model.to(args.device)
@@ -264,6 +412,11 @@ def main():  # noqa: C901
     else:
         raise NotImplementedError("Optimizer not recognized. Please check spelling")
 
+    warmup_scheduler = None
+    if args.lr_schedule == "multistep":
+        train_scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[60, 120, 160], gamma=0.2) 
+        warmup_scheduler = WarmUpLR(optimizer, len(train_loader))
+
     privacy_engine = None
     if not args.disable_dp:
         if args.clip_per_layer:
@@ -280,22 +433,22 @@ def main():  # noqa: C901
         privacy_engine = PrivacyEngine(
             secure_mode=args.secure_mode,
         )
-        model, optimizer, train_loader = privacy_engine.make_private(
+
+        model, optimizer, train_loader = privacy_engine.make_private_with_epsilon(
             module=model,
             optimizer=optimizer,
             data_loader=train_loader,
-            noise_multiplier=args.sigma,
+            target_epsilon = args.epsilon,
+            target_delta = args.delta,
+            epochs = args.epochs,
             max_grad_norm=max_grad_norm,
-            poisson_sampling=True,
+            poisson_sampling=True if not args.disable_dp else False,
             loss_reduction="mean",
             grad_sample_mode=config.grad_sample_mode
         )
 
-    criterion_func = nn.CrossEntropyLoss(reduction="mean")
-    criterion_func_non_reduction = nn.CrossEntropyLoss(reduction="mean")
-
     model.train()
-    print(model)
+    # print(model)
 
     torch.cuda.synchronize()
     start = time.time()
@@ -305,27 +458,43 @@ def main():  # noqa: C901
     accuracy_per_epoch = []
     time_per_epoch = []
 
+    best_acc1 = 0
+
+    torch.cuda.synchronize()
+    start_train = time.time()
+
     for epoch in range(args.start_epoch, args.epochs + 1):
         if args.lr_schedule == "cos":
             lr = args.lr * 0.5 * (1 + np.cos(np.pi * epoch / (args.epochs + 1)))
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
+        elif args.lr_schedule == "multistep":
+            train_scheduler.step(epoch)
 
-        train_duration = train(
-            args, model, train_loader, optimizer, privacy_engine, epoch, "cuda"
-        )
+        if args.disable_dp:
+            train_duration = train_non_private(
+                args, model, train_loader, optimizer, privacy_engine, epoch, "cuda", warmup_scheduler=warmup_scheduler
+            )
+        else:
+            train_duration = train(
+                args, model, train_loader, optimizer, privacy_engine, epoch, "cuda"
+            )
         top1_acc = test(args, model, test_loader, "cuda")
 
         # remember best acc@1 and save checkpoint
         is_best = top1_acc > best_acc1
         best_acc1 = max(top1_acc, best_acc1)
 
+        if is_best:
+            if args.model_save_path:
+                torch.save(model.state_dict(), args.model_save_path)
+
         time_per_epoch.append(train_duration)
         accuracy_per_epoch.append(float(top1_acc))
 
-
     torch.cuda.synchronize()
-    
+    end_train = time.time()
+
     time_per_epoch_seconds = [t.total_seconds() for t in time_per_epoch]
     avg_time_per_epoch = sum(time_per_epoch_seconds) / len(time_per_epoch_seconds)
     metrics = {
@@ -339,6 +508,15 @@ def main():  # noqa: C901
         "\nNote:\n- 'total_time' includes the data loading time, training time and testing time.\n- 'time_per_epoch' measures the training time only.\n"
     )
     logger.info(metrics)
+    logger.info(str_args(args))
+
+    print("================= Result ================")
+    if not args.disable_dp:
+        epsilon = privacy_engine.accountant.get_epsilon(delta=args.delta)
+        print(f"(ε = {epsilon:.2f}, δ = {args.delta})")
+    print(f"Best acc1 = {best_acc1}")
+    print(f"Total time elapsed = {end_train - start_train} sec")
+
 
 
 def parse_args():
@@ -352,10 +530,16 @@ def parse_args():
         help="number of data loading workers",
     )
     parser.add_argument(
-        "--steps",
+        "--epochs",
         default=100,
         type=int,
-        help="Number of steps",
+        help="Number of epochs",
+    )
+    parser.add_argument(
+        "--start_epoch",
+        default=0,
+        type=int,
+        help="Start epoch",
     )
     parser.add_argument(
         "--benchmark-data-loader",
@@ -366,17 +550,42 @@ def parse_args():
     parser.add_argument(
         "-b",
         "--batch_size",
-        default=128,
+        default=512,
         type=int,
         metavar="N",
-        help="mini-batch size for test dataset, this is the total "
+        help="mini-batch size for training dataset, this is the total "
         "batch size of all GPUs on the current node when "
         "using Data Parallel or Distributed Data Parallel",
+    )
+    parser.add_argument(
+        "--physical_batch_size",
+        default=-1,
+        type=int,
+        help="Physical mini-batch size."
+        "BatchMemoryManager in Opacus provide a functionality"
+        "to split virtual mini-batch into multiple physical mini-batch"
+        "It helps to train with large batch size using a limited memory"
+        "(Default: -1, which means it same with batch_size)",
+    )
+    parser.add_argument(
+        "--batch_size_test",
+        default=2048,
+        type=int,
+        help="mini-batch size for test dataset",
+    )
+    parser.add_argument(
+        "--print_freq",
+        default=10,
+        type=int,
+        help="Print frequency",
     )
     parser.add_argument(
         "--input_size",
         default=224,
         type=int,
+    )
+    parser.add_argument(
+        "--lr_schedule", default="cos", type=str, help="lr schedules"
     )
     parser.add_argument(
         "--lr",
@@ -435,6 +644,12 @@ def parse_args():
         help="Enable Secure mode to have trustworthy privacy guarantees. Comes at a performance cost",
     )
     parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=4.0,
+        help="Target epsilon (default: 4.0)",
+    )
+    parser.add_argument(
         "--delta",
         type=float,
         default=1e-5,
@@ -445,8 +660,8 @@ def parse_args():
     parser.add_argument(
         "--data-root",
         type=str,
-        default="data/cifar10",
-        help="Where CIFAR10 is/will be stored",
+        default="data",
+        help="Where train and test data is/will be stored",
     )
 
     parser.add_argument(
@@ -491,6 +706,18 @@ def parse_args():
 
     parser.add_argument(
         "--log_file", type=str, default="", help="logging file name."
+    )
+
+    parser.add_argument(
+        "--dataset", type=str, default="cifar10", help="Dataset."
+    )
+
+    parser.add_argument(
+        "--model_save_path", type=str, default="", help="Model save path (only store best acc model)."
+    )
+
+    parser.add_argument(
+        "--pretrained_path", type=str, default="", help="Pretrained model path."
     )
 
     return parser.parse_args()

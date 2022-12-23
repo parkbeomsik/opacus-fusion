@@ -48,5 +48,5 @@ def is_equal(path_1, path_2, verbose=True):
 
 if __name__ == "__main__":
     is_equal("value_test/value_data/bert-base_grad_ref.pt",
-             "value_test/value_data/bert-base_grad_elegant_hooks.pt", True)
+             "value_test/value_data/bert-base_grad_no_dp.pt", True)
             
